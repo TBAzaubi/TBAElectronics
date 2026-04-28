@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AZ Circuit Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app-container" class="is-locked">
+    <main id="breadboard-zone" aria-label="Breadboard workspace">
+      <canvas id="breadboard-canvas"></canvas>
+      <canvas id="schematic-canvas" width="420" height="220" aria-label="Challenge schematic"></canvas>
+
+      <aside id="message-stack" aria-label="Simulator feedback">
+        <div
+          id="placement-error"
+          class="message-card message-error"
+          role="alert"
+          aria-live="assertive"
+          aria-hidden="true"
+        ></div>
+
+        <section
+          id="audit-panel"
+          class="message-card message-audit"
+          aria-label="Active audit results"
+          aria-live="polite"
+          aria-hidden="true"
+        >
+          <div class="audit-header">
+            <span class="audit-title">Current audit</span>
+            <span id="audit-count" class="audit-count">0</span>
+          </div>
+          <ul id="audit-list">
+            <li class="audit-empty">No active audit results.</li>
+          </ul>
+        </section>
+
+        <div
+          id="status-message"
+          class="message-card message-status"
+          role="status"
+          aria-live="polite"
+        >
+          Select a tool to begin
+        </div>
+
+        <section id="history-toast" aria-label="Archived audit history">
+          <div class="history-header">
+            <span class="history-title">Archived audit history</span>
+            <span id="history-count" class="history-count">0</span>
+          </div>
+          <ul id="history-list">
+            <li class="history-empty">No archived audit results yet.</li>
+          </ul>
+        </section>
+      </aside>
+
+      <div id="az-signature" aria-hidden="true">AZ</div>
+    </main>
+
+    <section id="controls" aria-label="Simulator controls">
+      <div id="level-selector" class="control-group">
+        <span class="label">Challenge:</span>
+        <label class="sr-only" for="level-select">Select challenge level</label>
+        <select id="level-select">
+          <option value="1">Level 1</option>
+          <option value="2">Level 2</option>
+          <option value="3">Level 3</option>
+          <option value="4">Level 4</option>
+          <option value="5">Level 5</option>
+          <option value="6">Level 6</option>
+        </select>
+        <button id="load-level-btn" class="btn btn-load" type="button">Load</button>
+      </div>
+
+      <div id="parts-bin" class="control-group" aria-label="Parts bin">
+        <button id="wire-btn" class="btn" data-tool="WIRE" type="button">Wire</button>
+        <button id="led-btn" class="btn" data-tool="LED" type="button">LED</button>
+        <button id="resistor-btn" class="btn" data-tool="RESISTOR" type="button">Resistor</button>
+        <button id="buzzer-btn" class="btn" data-tool="BUZZER" type="button">🔊 Buzzer</button>
+        <button id="switch-btn" class="btn" data-tool="SWITCH" type="button">🔘 Switch</button>
+        <button id="trash-btn" class="btn btn-trash" data-tool="TRASH" type="button">🗑️ Trash</button>
+      </div>
+
+      <div id="settings" class="control-group">
+        <button id="mode-toggle-btn" class="btn" type="button">Mode: Normal</button>
+      </div>
+
+      <div class="control-group session-group" aria-label="Current session">
+        <div class="session-info">
+          <span class="session-label">Student</span>
+          <span id="current-student-name" class="session-value">Not signed in</span>
+        </div>
+        <button id="end-session-btn" class="btn btn-end-session" type="button">End Session</button>
+      </div>
+
+      <div id="actions" class="control-group">
+        <button id="check-btn" class="btn btn-check" type="button">Check</button>
+        <button id="clear-btn" class="btn btn-clear" type="button">Clear</button>
+        <button id="undo-btn" class="btn" type="button">Undo</button>
+      </div>
+    </section>
+
+
+    <div id="splash-overlay" class="splash-overlay" aria-hidden="false">
+      <div class="splash-card" role="dialog" aria-modal="true" aria-labelledby="splash-title">
+        <div class="splash-eyebrow">3BC Simulator</div>
+        <h1 id="splash-title">Enter the simulator</h1>
+        <p class="splash-copy">Select your name and enter the password to begin this session.</p>
+
+        <div class="splash-field">
+          <label for="student-select">Student name</label>
+          <select id="student-select">
+            <option value="">Select your name</option>
+          </select>
+        </div>
+
+        <div class="splash-field">
+          <label for="splash-password">Password</label>
+          <input id="splash-password" type="password" autocomplete="off" />
+        </div>
+
+        <div id="splash-error" class="splash-error" aria-live="polite"></div>
+
+        <div class="splash-actions">
+          <button id="enter-simulator-btn" class="btn btn-load" type="button">Enter</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
