@@ -119,6 +119,10 @@
     eventHistory: [],
     isUnlocked: false,
     challengeInstanceID: null,
+    level3Tier: 1,
+    level3CorrectStreak: 0,
+    level5ComponentCount: 4,
+    level5CorrectStreak: 0,
   };
 
   // ============================================================
@@ -278,6 +282,10 @@
         activeAuditErrors: state.activeAuditErrors,
         archivedAuditErrors: state.archivedAuditErrors,
         actionHistory: state.actionHistory,
+        level3Tier: state.level3Tier,
+        level3CorrectStreak: state.level3CorrectStreak,
+        level5ComponentCount: state.level5ComponentCount,
+        level5CorrectStreak: state.level5CorrectStreak,
       }));
     } catch (err) {}
   }
@@ -307,6 +315,10 @@
       state.activeAuditErrors      = saved.activeAuditErrors     || [];
       state.archivedAuditErrors    = saved.archivedAuditErrors   || [];
       state.actionHistory          = saved.actionHistory         || [];
+      state.level3Tier             = saved.level3Tier             || 1;
+      state.level3CorrectStreak    = saved.level3CorrectStreak   || 0;
+      state.level5ComponentCount   = saved.level5ComponentCount  || 4;
+      state.level5CorrectStreak    = saved.level5CorrectStreak   || 0;
       return true;
     } catch (err) {
       clearBoardState();
@@ -426,7 +438,12 @@
     }
 
     state.sessionID = createSessionID();
+    state.level3Tier = 1;
+    state.level3CorrectStreak = 0;
+    state.level5ComponentCount = 4;
+    state.level5CorrectStreak = 0;
     unlockSimulator(isMasterBypass ? MASTER_BYPASS_NAME : selectedStudent);
+    saveBoardState(); // persist tier/streak reset immediately so a reload won't restore stale values
   }
 
   function handleEndSession() {
@@ -1741,6 +1758,27 @@
       return;
     }
 
+    if (state.currentLevelGoal.schematicStyle === "closed_loop_parallel") {
+      drawClosedLoopParallelSchematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "open_parallel_star") {
+      drawOpenParallelStarSchematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "open_parallel_branch") {
+      drawOpenParallelBranchSchematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "open_parallel_cascade") {
+      drawOpenParallelCascadeSchematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "open_parallel_fork3") {
+      drawOpenParallelFork3Schematic(state.currentLevelGoal);
+      return;
+    }
+
     schematicCtx.font = "12px Arial";
     schematicCtx.fillStyle = "#374151";
     schematicCtx.fillText(state.currentLevelGoal.instructions, 16, 44);
@@ -1952,8 +1990,10 @@
   }
 
   function drawSeriesSymbolAt(element, x, y, angle) {
-    const flip = angle < -0.001 || angle > Math.PI / 2 + 0.001;
-    const positiveOnStart = !flip;
+    // The entry/Positive pin is always at local-left (-x). After canvas rotation the entry
+    // end visually lands on the junction side regardless of angle, so positiveOnStart is
+    // unconditionally true — rotation handles the flip automatically.
+    const positiveOnStart = true;
     const isMostlyHorizontal = Math.abs(Math.cos(angle)) > 0.5;
     schematicCtx.save();
     schematicCtx.translate(x, y);
@@ -2013,28 +2053,46 @@
       schematicCtx.textAlign = "center";
       schematicCtx.fillText("+", positiveX, plusY);
     } else if (element.type === "SWITCH") {
+      // Lead wires
       schematicCtx.beginPath();
-      schematicCtx.moveTo(-22, 0); schematicCtx.lineTo(-8, 0);
-      schematicCtx.moveTo(8, 0); schematicCtx.lineTo(22, 0);
+      schematicCtx.moveTo(-22, 0); schematicCtx.lineTo(-10, 0);
+      schematicCtx.moveTo(10, 0); schematicCtx.lineTo(22, 0);
+      schematicCtx.stroke();
+      // Open contact circles (stroke only — not filled)
+      schematicCtx.lineWidth = 2;
+      schematicCtx.beginPath();
+      schematicCtx.arc(-10, 0, 3, 0, Math.PI * 2);
       schematicCtx.stroke();
       schematicCtx.beginPath();
-      schematicCtx.moveTo(-8, 0);
-      schematicCtx.lineTo(6, -10);
+      schematicCtx.arc(10, 0, 3, 0, Math.PI * 2);
       schematicCtx.stroke();
+      schematicCtx.lineWidth = 3;
+      // Actuator cap: wider horizontal bar, floating above the open contacts
       schematicCtx.beginPath();
-      schematicCtx.arc(-8, 0, 3, 0, Math.PI * 2);
-      schematicCtx.arc(8, 0, 3, 0, Math.PI * 2);
-      schematicCtx.fillStyle = "#2c3e50";
-      schematicCtx.fill();
+      schematicCtx.moveTo(-9, -9); schematicCtx.lineTo(9, -9);
+      schematicCtx.stroke();
+      // Center stem: rises from the middle of the cap upward
+      schematicCtx.beginPath();
+      schematicCtx.moveTo(0, -9); schematicCtx.lineTo(0, -16);
+      schematicCtx.stroke();
+      // Narrow top bar: ~half the cap width, sits on top of the stem
+      schematicCtx.beginPath();
+      schematicCtx.moveTo(-5, -16); schematicCtx.lineTo(5, -16);
+      schematicCtx.stroke();
     }
 
     schematicCtx.restore();
 
     let labelOffsetX = isMostlyHorizontal ? 0 : 18;
-    let labelOffsetY = isMostlyHorizontal ? -22 : 0;
+    let labelOffsetY = isMostlyHorizontal ? -28 : 0;
     if (element.type === "BUZZER") {
       labelOffsetX = isMostlyHorizontal ? 0 : 30;
       labelOffsetY = isMostlyHorizontal ? -24 : -4;
+    }
+    if (element.type === "SWITCH") {
+      // T-post reaches y=-12; push label higher to avoid overlap
+      labelOffsetX = isMostlyHorizontal ? 0 : 30;
+      labelOffsetY = isMostlyHorizontal ? -30 : -6;
     }
     schematicCtx.fillStyle = "#111827";
     schematicCtx.font = "bold 14px Arial";
@@ -2096,6 +2154,141 @@
     schematicCtx.stroke();
 
     schematicCtx.restore();
+  }
+
+  function drawSchematicLine(x1, y1, x2, y2) {
+    schematicCtx.save();
+    schematicCtx.beginPath();
+    schematicCtx.strokeStyle = "#2c3e50";
+    schematicCtx.lineWidth = 3;
+    schematicCtx.lineCap = "round";
+    schematicCtx.moveTo(x1, y1);
+    schematicCtx.lineTo(x2, y2);
+    schematicCtx.stroke();
+    schematicCtx.restore();
+  }
+
+  function drawJunctionDot(x, y) {
+    schematicCtx.save();
+    schematicCtx.beginPath();
+    schematicCtx.fillStyle = "#2c3e50";
+    schematicCtx.arc(x, y, 4, 0, Math.PI * 2);
+    schematicCtx.fill();
+    schematicCtx.restore();
+  }
+
+  function drawBatteryVertical(x, topY, bottomY) {
+    const centerY = (topY + bottomY) / 2;
+    const plateYs = [centerY - 10, centerY - 3, centerY + 4, centerY + 11];
+    const plateHalfWidths = [18, 10, 18, 10]; // wider plate = positive (top)
+
+    schematicCtx.save();
+    schematicCtx.strokeStyle = "#000";
+    schematicCtx.lineWidth = 3;
+    schematicCtx.lineCap = "round";
+
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(x, topY);
+    schematicCtx.lineTo(x, plateYs[0]);
+    schematicCtx.stroke();
+
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(x, plateYs[plateYs.length - 1]);
+    schematicCtx.lineTo(x, bottomY);
+    schematicCtx.stroke();
+
+    schematicCtx.beginPath();
+    plateYs.forEach((py, idx) => {
+      schematicCtx.moveTo(x - plateHalfWidths[idx], py);
+      schematicCtx.lineTo(x + plateHalfWidths[idx], py);
+    });
+    schematicCtx.stroke();
+
+    schematicCtx.fillStyle = "#e74c3c";
+    schematicCtx.font = "bold 11px Arial";
+    schematicCtx.textAlign = "left";
+    schematicCtx.fillText("+", x + 22, centerY - 14);
+
+    schematicCtx.restore();
+  }
+
+  function drawRailComponentsHorizontal(components, fromX, toX, y, reverseOrder = false) {
+    if (components.length === 0) {
+      drawSchematicLine(fromX, y, toX, y);
+      return;
+    }
+    const displayComps = reverseOrder ? [...components].reverse() : components;
+    const spacing = (toX - fromX) / (displayComps.length + 1);
+    const positions = displayComps.map((_, i) => fromX + spacing * (i + 1));
+    const halfLens = displayComps.map(c => getSymbolHalfLengthForElement(c));
+
+    drawSchematicLine(fromX, y, positions[0] - halfLens[0], y);
+    displayComps.forEach((comp, i) => {
+      drawSeriesSymbolAt(comp, positions[i], y, 0);
+      if (i < displayComps.length - 1) {
+        drawSchematicLine(positions[i] + halfLens[i], y, positions[i + 1] - halfLens[i + 1], y);
+      }
+    });
+    drawSchematicLine(positions[positions.length - 1] + halfLens[halfLens.length - 1], y, toX, y);
+  }
+
+  function drawBranchComponentsVertical(branch, bx, topY, bottomY) {
+    const midY = (topY + bottomY) / 2;
+    let positions;
+    if (branch.length === 1) {
+      positions = [midY];
+    } else {
+      const maxHalf = Math.max(...branch.map(c => getSymbolHalfLengthForElement(c)));
+      const spacing = maxHalf * 2 + 8;
+      positions = [midY - spacing / 2, midY + spacing / 2];
+    }
+    const halfLens = branch.map(c => getSymbolHalfLengthForElement(c));
+
+    drawSchematicLine(bx, topY, bx, positions[0] - halfLens[0]);
+    branch.forEach((comp, i) => {
+      drawSeriesSymbolAt(comp, bx, positions[i], Math.PI / 2);
+      if (i < branch.length - 1) {
+        drawSchematicLine(bx, positions[i] + halfLens[i], bx, positions[i + 1] - halfLens[i + 1]);
+      }
+    });
+    drawSchematicLine(bx, positions[positions.length - 1] + halfLens[halfLens.length - 1], bx, bottomY);
+  }
+
+  function drawClosedLoopParallelSchematic(levelGoal) {
+    const { topRail, botRail, branches } = levelGoal.schematicData;
+    const branchCount = branches.length;
+
+    schematicCtx.font = "12px Arial";
+    schematicCtx.fillStyle = "#374151";
+    schematicCtx.textAlign = "left";
+    schematicCtx.fillText(levelGoal.instructions, 16, 44);
+
+    const BL = 45, BR = 482, T = 88, B = 250;
+    const splitXTable = [60, 100, 195];
+    const topSplitX = BL + splitXTable[Math.min(topRail.length, 2)];
+    const botSplitX = BL + splitXTable[Math.min(botRail.length, 2)];
+    const junctionX = Math.max(topSplitX, botSplitX);
+
+    const branchAreaWidth = BR - junctionX;
+    const branchXs = Array.from({ length: branchCount }, (_, i) =>
+      junctionX + branchAreaWidth * (i + 1) / (branchCount + 1)
+    );
+    const lastBranchX = branchXs[branchXs.length - 1];
+
+    drawBatteryVertical(BL, T, B);
+
+    drawRailComponentsHorizontal(topRail, BL, topSplitX, T);
+    drawSchematicLine(topSplitX, T, lastBranchX, T);
+
+    drawRailComponentsHorizontal(botRail, BL, botSplitX, B, true);
+    drawSchematicLine(botSplitX, B, lastBranchX, B);
+
+    branches.forEach((branch, i) => drawBranchComponentsVertical(branch, branchXs[i], T, B));
+
+    for (let i = 0; i < branchCount - 1; i++) {
+      drawJunctionDot(branchXs[i], T);
+      drawJunctionDot(branchXs[i], B);
+    }
   }
 
   function drawRequirementRow(requirement, y) {
@@ -2250,28 +2443,39 @@
       ctx.fillText("BZ1", 0, -20);
       ctx.restore();
     } else if (type === "SWITCH") {
+      // Lead wires
       ctx.beginPath();
       ctx.moveTo(-45, 0); ctx.lineTo(-15, 0);
       ctx.moveTo(15, 0); ctx.lineTo(45, 0);
       ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(-15, 0);
-      ctx.lineTo(12, -15);
-      ctx.stroke();
-
+      // Open contact circles (stroke only)
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(-15, 0, 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
       ctx.arc(15, 0, 3, 0, Math.PI * 2);
-      ctx.fillStyle = "#2c3e50";
-      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = 3;
+      // Actuator cap
+      ctx.beginPath();
+      ctx.moveTo(-13, -9); ctx.lineTo(13, -9);
+      ctx.stroke();
+      // Center stem
+      ctx.beginPath();
+      ctx.moveTo(0, -9); ctx.lineTo(0, -18);
+      ctx.stroke();
+      // Narrow top bar
+      ctx.beginPath();
+      ctx.moveTo(-7, -18); ctx.lineTo(7, -18);
+      ctx.stroke();
 
       ctx.save();
       if (isFlipped) ctx.scale(-1, 1);
       ctx.fillStyle = "#000";
       ctx.font = "bold 14px Arial";
       ctx.textAlign = "center";
-      ctx.fillText("S1", 0, -25);
+      ctx.fillText("S1", 0, -32);
       ctx.restore();
     }
 
@@ -2716,6 +2920,24 @@
     const expectedType = endpointB.kind === "component" ? endpointB.type : null;
     const fromNetIDs = new Set(refsA.map((ref) => ref.netID));
 
+    // For multi-way nodes (e.g. Tier-1 star), multiple requirements share the same
+    // "from" descriptor. Other expected components are legitimately co-located at that
+    // node, so they must not be counted as "wrong type." Collect every component type
+    // that any requirement places at the same node as requirement.from.
+    const allExpectedTypesAtNode = new Set([endpointA.type, expectedType].filter(Boolean));
+    if (state.currentLevelGoal && state.currentLevelGoal.required_nets) {
+      state.currentLevelGoal.required_nets.forEach((req) => {
+        if (req.from === requirement.from) {
+          const ep = parseEndpoint(req.to);
+          if (ep.kind === "component") allExpectedTypesAtNode.add(ep.type);
+        }
+        if (req.to === requirement.from) {
+          const ep = parseEndpoint(req.from);
+          if (ep.kind === "component") allExpectedTypesAtNode.add(ep.type);
+        }
+      });
+    }
+
     let touchedWrongThing = false;
 
     for (const groupInfo of groupsA) {
@@ -2731,8 +2953,16 @@
           touchedWrongThing = true;
         }
       } else {
-        const hasExpectedTypeAnyPin = groupInfo.participants.components.some((entry) => entry.type === expectedType && entry.selected);
-        const hasWrongType = groupInfo.participants.components.some((entry) => entry.type !== endpointA.type && entry.type !== expectedType);
+        // hasExpectedTypeAnyPin: the specific required instance is at this node but via
+        // the wrong pin (e.g. LED_2 is here but via Cathode, not Anode). Comparing by
+        // component identity rather than just type prevents false positives when a *different*
+        // instance of the same type (LED_1) is correctly at the same star node.
+        const expectedComponentForB = endpointB.kind === "component"
+          ? config.componentByInstanceKey[endpointB.instanceKey]
+          : null;
+        const hasExpectedTypeAnyPin = expectedComponentForB != null &&
+          groupInfo.participants.components.some((entry) => entry.component === expectedComponentForB);
+        const hasWrongType = groupInfo.participants.components.some((entry) => !allExpectedTypesAtNode.has(entry.type));
         const hasExtraNet = groupInfo.participants.netSources.some((netID) => !fromNetIDs.has(netID));
 
         if (hasExpectedTypeAnyPin || hasWrongType || hasExtraNet) {
@@ -2779,8 +3009,13 @@
       const descriptors = Array.from(nodesByID.get(nodeID) || []);
       const expectedTokens = buildExpectedTokensForNode(descriptors, bestConfig, chosenTokens);
       const participants = getGroupParticipants(result.group, bestConfig);
-      const extraTokens = Array.from(participants.tokens).filter((token) => !expectedTokens.has(token) && !shortedLeadTokens.has(token));
-      if (extraTokens.length === 0) return;
+      const nonShortedActual = Array.from(participants.tokens).filter((token) => !shortedLeadTokens.has(token));
+      const extraTokens = nonShortedActual.filter((token) => !expectedTokens.has(token));
+      // Only flag Extra Connection when the actual connection count exceeds the expected
+      // count. A mis-wired token (wrong pin at the right node) is caught by Wrong Connection;
+      // Extra Connection should only fire when there are literally more connections than the
+      // challenge calls for at this node (e.g. 4 things at a 3-way junction).
+      if (extraTokens.length === 0 || nonShortedActual.length <= expectedTokens.size) return;
 
       const containsMCU = participants.netSources.some((netID) => netID.startsWith("MCU_"));
       issues.push(makeAuditEntry(
@@ -2886,6 +3121,35 @@
     const audit = auditCircuit();
 
     if (audit.isSuccess) {
+      // Only count this as a "perfect run" if it was the student's very first Check
+      // attempt on this challenge (checkAttemptCount was incremented above, so === 1
+      // means no prior failed checks). A pass after any failed attempt does not advance
+      // the streak — it just leaves the streak where the failure reset left it (0).
+      const firstTrySuccess = state.checkAttemptCount === 1;
+
+      if (getCurrentLevelID() === 3) {
+        if (firstTrySuccess) {
+          state.level3CorrectStreak += 1;
+          if (state.level3CorrectStreak >= 2 && state.level3Tier < 3) {
+            state.level3Tier += 1;
+            state.level3CorrectStreak = 0;
+          }
+        } else {
+          state.level3CorrectStreak = 0;
+        }
+      }
+      if (getCurrentLevelID() === 5) {
+        if (firstTrySuccess) {
+          state.level5CorrectStreak += 1;
+          if (state.level5CorrectStreak >= 2 && state.level5ComponentCount < 8) {
+            state.level5ComponentCount += 1;
+            state.level5CorrectStreak = 0;
+          }
+        } else {
+          state.level5CorrectStreak = 0;
+        }
+      }
+
       setSignatureVisible(true);
       clearActiveAuditStack();
       state.lastSuccessExportRows = buildSuccessExportRows();
@@ -2918,6 +3182,12 @@
     }
 
     beaconExportRows(auditIssuesToExportRows(audit.issues));
+
+    // Any failed check breaks the "perfect run" streak — the student must
+    // complete consecutive challenges with zero audit errors from the first try.
+    if (getCurrentLevelID() === 3) state.level3CorrectStreak = 0;
+    if (getCurrentLevelID() === 5) state.level5CorrectStreak = 0;
+    saveBoardState(); // persist the reset streak so a reload can't resurrect it
 
     setSignatureVisible(false);
     setActiveAuditErrors(audit.issues);
@@ -2973,15 +3243,41 @@
       case 2:
         return generateSeriesChain(levelNumber);
       case 3:
-        return generateParallelMatch(levelNumber);
+        return generateLevel3(levelNumber);
       case 4:
-        return generateSourceToComponent(levelNumber);
+        return generateLevel4Placeholder(levelNumber);
       case 5:
-        return generateSourceBridge(levelNumber);
+        return generateLevel5(levelNumber);
       case 6:
+        return generateLevel6Placeholder(levelNumber);
+      case 7:
       default:
-        return generateThreeNodeChallenge(levelNumber);
+        return generateLevel7Placeholder(levelNumber);
     }
+  }
+
+  function generateLevel4Placeholder(levelNumber) {
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Coming soon.`,
+      required_nets: [],
+    };
+  }
+
+  function generateLevel6Placeholder(levelNumber) {
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Coming soon.`,
+      required_nets: [],
+    };
+  }
+
+  function generateLevel7Placeholder(levelNumber) {
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Coming soon.`,
+      required_nets: [],
+    };
   }
 
   function randomPart() {
@@ -3039,6 +3335,426 @@
       schematicElements,
       schematicLayout: pickLevel2SchematicLayout(schematicElements),
     };
+  }
+
+  // ============================================================
+  // LEVEL 3 — OPEN PARALLEL (TIER-BASED)
+  // ============================================================
+  function generateLevel3(levelNumber) {
+    const tier = state.level3Tier;
+    if (tier === 1) return generateLevel3Tier1(levelNumber);
+    if (tier === 2) return generateLevel3Tier2(levelNumber);
+    return generateLevel3Tier3(levelNumber);
+  }
+
+  // --- Tier 1: Star topology (3 components, shared node, no rail requirement) ---
+  // Three components meet at a single node. The student creates the node on the
+  // breadboard by placing all three entry pins in the same electrically-connected hole group.
+  function generateLevel3Tier1(levelNumber) {
+    const typeCount = {};
+    function pickComp() {
+      const type = randomItem(TWO_PIN_PARTS);
+      typeCount[type] = (typeCount[type] || 0) + 1;
+      const idx = typeCount[type];
+      const { entryPin, exitPin } = getSeriesChainPinsForType(type);
+      return { type, instanceKey: `${type}_${idx}`, entryPin, exitPin, label: getSchematicTypeLabel(type, idx) };
+    }
+
+    const starComps = [pickComp(), pickComp(), pickComp()];
+    const anchor = `${starComps[0].instanceKey}:${starComps[0].entryPin}`;
+
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Build the open parallel circuit shown.`,
+      required_nets: [
+        { from: anchor, to: `${starComps[1].instanceKey}:${starComps[1].entryPin}` },
+        { from: anchor, to: `${starComps[2].instanceKey}:${starComps[2].entryPin}` },
+      ],
+      schematicStyle: "open_parallel_star",
+      schematicData: { starComps },
+    };
+  }
+
+  // --- Tier 2: Single split, 2–3 branches, 4 components total (battery always present) ---
+  function generateLevel3Tier2(levelNumber) {
+    const typeCount = {};
+    function pickComp(polarOK = true) {
+      const pool = polarOK ? TWO_PIN_PARTS : ["RESISTOR", "SWITCH"];
+      const type = randomItem(pool);
+      typeCount[type] = (typeCount[type] || 0) + 1;
+      const idx = typeCount[type];
+      const { entryPin, exitPin } = getSeriesChainPinsForType(type);
+      return { type, instanceKey: `${type}_${idx}`, entryPin, exitPin, label: getSchematicTypeLabel(type, idx) };
+    }
+
+    // Pick layout: seriesCount (0–2) and branches such that total = 4
+    const layouts = [
+      { seriesCount: 0, branchLengths: [2, 2] },
+      { seriesCount: 0, branchLengths: [1, 2, 1] },
+      { seriesCount: 1, branchLengths: [1, 2] },
+      { seriesCount: 1, branchLengths: [2, 1] },
+      { seriesCount: 1, branchLengths: [1, 1, 1] },
+      { seriesCount: 2, branchLengths: [1, 1] },
+    ];
+    const layout = randomItem(layouts);
+
+    const seriesHead = Array.from({ length: layout.seriesCount }, () => pickComp());
+    const branches = layout.branchLengths.map(len =>
+      Array.from({ length: len }, () => pickComp())
+    );
+
+    const nets = [];
+    const vcc = "RAIL_TOP_RED";
+
+    // Series chain from Vcc to split point
+    if (seriesHead.length === 0) {
+      // split point IS Vcc
+      const splitNode = vcc;
+      for (const branch of branches) {
+        nets.push({ from: splitNode, to: `${branch[0].instanceKey}:${branch[0].entryPin}` });
+        for (let i = 0; i < branch.length - 1; i++) {
+          nets.push({ from: `${branch[i].instanceKey}:${branch[i].exitPin}`, to: `${branch[i + 1].instanceKey}:${branch[i + 1].entryPin}` });
+        }
+      }
+    } else {
+      nets.push({ from: vcc, to: `${seriesHead[0].instanceKey}:${seriesHead[0].entryPin}` });
+      for (let i = 0; i < seriesHead.length - 1; i++) {
+        nets.push({ from: `${seriesHead[i].instanceKey}:${seriesHead[i].exitPin}`, to: `${seriesHead[i + 1].instanceKey}:${seriesHead[i + 1].entryPin}` });
+      }
+      const splitNode = `${seriesHead[seriesHead.length - 1].instanceKey}:${seriesHead[seriesHead.length - 1].exitPin}`;
+      for (const branch of branches) {
+        nets.push({ from: splitNode, to: `${branch[0].instanceKey}:${branch[0].entryPin}` });
+        for (let i = 0; i < branch.length - 1; i++) {
+          nets.push({ from: `${branch[i].instanceKey}:${branch[i].exitPin}`, to: `${branch[i + 1].instanceKey}:${branch[i + 1].entryPin}` });
+        }
+      }
+    }
+
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Build the open parallel circuit shown.`,
+      required_nets: nets,
+      schematicStyle: "open_parallel_branch",
+      schematicData: { seriesHead, branches },
+    };
+  }
+
+  // --- Tier 3: Two split nodes, 5 components (battery always present) ---
+  function generateLevel3Tier3(levelNumber) {
+    const typeCount = {};
+    function pickComp(polarOK = true) {
+      const pool = polarOK ? TWO_PIN_PARTS : ["RESISTOR", "SWITCH"];
+      const type = randomItem(pool);
+      typeCount[type] = (typeCount[type] || 0) + 1;
+      const idx = typeCount[type];
+      const { entryPin, exitPin } = getSeriesChainPinsForType(type);
+      return { type, instanceKey: `${type}_${idx}`, entryPin, exitPin, label: getSchematicTypeLabel(type, idx) };
+    }
+
+    const vcc = "RAIL_TOP_RED";
+    const usesCascade = Math.random() < 0.5;
+
+    if (usesCascade) {
+      // Cascade: battery → A(series) → j1[B(branch), C(spine) → j2[D, E]]
+      const compA = pickComp();
+      const compB = pickComp();
+      const compC = pickComp();
+      const compD = pickComp();
+      const compE = pickComp();
+
+      const nets = [
+        { from: vcc, to: `${compA.instanceKey}:${compA.entryPin}` },
+        { from: `${compA.instanceKey}:${compA.exitPin}`, to: `${compB.instanceKey}:${compB.entryPin}` },
+        { from: `${compA.instanceKey}:${compA.exitPin}`, to: `${compC.instanceKey}:${compC.entryPin}` },
+        { from: `${compC.instanceKey}:${compC.exitPin}`, to: `${compD.instanceKey}:${compD.entryPin}` },
+        { from: `${compC.instanceKey}:${compC.exitPin}`, to: `${compE.instanceKey}:${compE.entryPin}` },
+      ];
+
+      return {
+        id: levelNumber,
+        instructions: `Level ${levelNumber}: Build the open parallel circuit shown.`,
+        required_nets: nets,
+        schematicStyle: "open_parallel_cascade",
+        schematicData: { compA, compB, compC, compD, compE },
+      };
+    } else {
+      // Fork-3: battery → j1[A(branch), B(branch), C(spine) → j2[D, E]]
+      const compA = pickComp();
+      const compB = pickComp();
+      const compC = pickComp();
+      const compD = pickComp();
+      const compE = pickComp();
+
+      const nets = [
+        { from: vcc, to: `${compA.instanceKey}:${compA.entryPin}` },
+        { from: vcc, to: `${compB.instanceKey}:${compB.entryPin}` },
+        { from: vcc, to: `${compC.instanceKey}:${compC.entryPin}` },
+        { from: `${compC.instanceKey}:${compC.exitPin}`, to: `${compD.instanceKey}:${compD.entryPin}` },
+        { from: `${compC.instanceKey}:${compC.exitPin}`, to: `${compE.instanceKey}:${compE.entryPin}` },
+      ];
+
+      return {
+        id: levelNumber,
+        instructions: `Level ${levelNumber}: Build the open parallel circuit shown.`,
+        required_nets: nets,
+        schematicStyle: "open_parallel_fork3",
+        schematicData: { compA, compB, compC, compD, compE },
+      };
+    }
+  }
+
+  // ============================================================
+  // LEVEL 3 SCHEMATIC RENDERERS
+  // ============================================================
+
+  function drawInstructionText(text) {
+    schematicCtx.font = "12px Arial";
+    schematicCtx.fillStyle = "#374151";
+    schematicCtx.textAlign = "left";
+    schematicCtx.fillText(text, 16, 44);
+  }
+
+  // --- Tier 1 renderer: Star topology ---
+  // Central junction with three arms: LEFT, RIGHT, and UP.
+  // Each arm's entry pin (anode/positive/P1) is at the central node.
+  //   LEFT arm  → angle=π   (symbol flipped, so entry is at the RIGHT end = node)
+  //   RIGHT arm → angle=0   (entry naturally at LEFT end = node)
+  //   UP arm    → angle=−π/2 (entry at BOTTOM = node)
+  function drawOpenParallelStarSchematic(levelGoal) {
+    const { starComps } = levelGoal.schematicData;
+    const [compLeft, compRight, compUp] = starComps;
+    drawInstructionText(levelGoal.instructions);
+
+    const cx = 250, cy = 169;
+    const leftEnd = 55, rightEnd = 445, topStub = 95;
+
+    const halfL = getSymbolHalfLengthForElement(compLeft);
+    const halfR = getSymbolHalfLengthForElement(compRight);
+    const halfU = getSymbolHalfLengthForElement(compUp);
+
+    const leftCX  = (leftEnd + cx) / 2;   // centre of left component
+    const rightCX = (cx + rightEnd) / 2;  // centre of right component
+    // angle=−π/2: entry at (cx, upCY + halfU) → set upCY = cy − halfU so entry = cy
+    const upCY = cy - halfU;
+
+    // LEFT arm (angle=π → entry at right end = node)
+    drawSchematicLine(leftEnd, cy, leftCX - halfL, cy);
+    drawSeriesSymbolAt(compLeft, leftCX, cy, Math.PI);
+    drawSchematicLine(leftCX + halfL, cy, cx, cy);
+
+    // RIGHT arm (angle=0 → entry at left end = node)
+    drawSchematicLine(cx, cy, rightCX - halfR, cy);
+    drawSeriesSymbolAt(compRight, rightCX, cy, 0);
+    drawSchematicLine(rightCX + halfR, cy, rightEnd, cy);
+
+    // UP arm (angle=−π/2 → entry at bottom = node)
+    drawSchematicLine(cx, topStub, cx, upCY - halfU);
+    drawSeriesSymbolAt(compUp, cx, upCY, -Math.PI / 2);
+    // no wire between entry end and node — entry IS at cy
+
+    // Central junction dot
+    drawJunctionDot(cx, cy);
+  }
+
+  // --- Tier 2 renderer: Single split, open branches ---
+  function drawOpenParallelBranchSchematic(levelGoal) {
+    const { seriesHead, branches } = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    const BL = 45, BR = 482, T = 88, B = 250;
+    const splitXTable = [60, 100, 195];
+    const junctionX = BL + splitXTable[Math.min(seriesHead.length, 2)];
+
+    const branchCount = branches.length;
+    const branchAreaWidth = BR - junctionX;
+    const branchXs = Array.from({ length: branchCount }, (_, i) =>
+      junctionX + branchAreaWidth * (i + 1) / (branchCount + 1)
+    );
+    const lastBranchX = branchXs[branchXs.length - 1];
+
+    // Battery
+    drawBatteryVertical(BL, T, B);
+
+    // Top rail with series components
+    drawRailComponentsHorizontal(seriesHead, BL, junctionX, T);
+    drawSchematicLine(junctionX, T, lastBranchX, T);
+
+    // Open branches (no bottom wire)
+    branches.forEach((branch, i) => {
+      drawBranchComponentsVertical(branch, branchXs[i], T, B);
+    });
+
+    // Junction dots at all non-rightmost branches
+    for (let i = 0; i < branchCount - 1; i++) {
+      drawJunctionDot(branchXs[i], T);
+    }
+  }
+
+  // --- Tier 3 cascade renderer: battery → A → j1[B, C → j2[D, E]] ---
+  function drawOpenParallelCascadeSchematic(levelGoal) {
+    const { compA, compB, compC, compD, compE } = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    const BL = 45, T = 88, B = 250;
+    // Top spine: BL → [A] → j1X → [C] → j2X → rightEnd
+    const j1X = 165;
+    const j2X = 310;
+    const rightEnd = 395;
+    // Branch B at j1X, branches D and E centered around j2X
+    const dX = j2X;
+    const eX = j2X + 55;
+
+    drawBatteryVertical(BL, T, B);
+    drawRailComponentsHorizontal([compA], BL, j1X, T);
+    drawRailComponentsHorizontal([compC], j1X, j2X, T);
+    drawSchematicLine(j2X, T, rightEnd, T);
+
+    drawBranchComponentsVertical([compB], j1X, T, B);
+    drawBranchComponentsVertical([compD], dX, T, B);
+    drawBranchComponentsVertical([compE], eX, T, B);
+
+    drawJunctionDot(j1X, T);
+    drawJunctionDot(j2X, T);
+  }
+
+  // --- Tier 3 fork-3 renderer: battery → j1[A, B, C → j2[D, E]] ---
+  function drawOpenParallelFork3Schematic(levelGoal) {
+    const { compA, compB, compC, compD, compE } = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    const BL = 45, BR = 482, T = 88, B = 250;
+    const junctionX = BL + 60;
+    // 3 main branches: A, B, C spread between junctionX and BR
+    const branchAreaW = BR - junctionX;
+    const aX = junctionX + branchAreaW * 1 / 4;
+    const bX = junctionX + branchAreaW * 2 / 4;
+    const cX = junctionX + branchAreaW * 3 / 4;
+
+    // Sub-branches D and E hang from midpoint of C branch
+    const subOffset = 32;
+    const j2Y = T + (B - T) * 0.42;
+    const dX = cX - subOffset;
+    const eX = cX + subOffset;
+    const subBottom = B;
+
+    drawBatteryVertical(BL, T, B);
+    drawSchematicLine(BL, T, cX, T);
+
+    // Main branches A and B (full height, open)
+    drawBranchComponentsVertical([compA], aX, T, B);
+    drawBranchComponentsVertical([compB], bX, T, B);
+
+    // C branch: from T down to j2Y (includes component), then horizontal to D/E
+    const cHalf = getSymbolHalfLengthForElement(compC);
+    const cCenter = T + (j2Y - T) / 2;
+    drawSchematicLine(cX, T, cX, cCenter - cHalf);
+    drawSeriesSymbolAt(compC, cX, cCenter, Math.PI / 2);
+    drawSchematicLine(cX, cCenter + cHalf, cX, j2Y);
+
+    // j2 node: horizontal wire to D and E
+    drawSchematicLine(dX, j2Y, eX, j2Y);
+    drawJunctionDot(cX, j2Y);
+
+    // Sub-branches D and E from j2
+    const dHalf = getSymbolHalfLengthForElement(compD);
+    const dCenter = j2Y + (subBottom - j2Y) / 2;
+    drawSchematicLine(dX, j2Y, dX, dCenter - dHalf);
+    drawSeriesSymbolAt(compD, dX, dCenter, Math.PI / 2);
+    drawSchematicLine(dX, dCenter + dHalf, dX, subBottom);
+
+    const eHalf = getSymbolHalfLengthForElement(compE);
+    const eCenter = j2Y + (subBottom - j2Y) / 2;
+    drawSchematicLine(eX, j2Y, eX, eCenter - eHalf);
+    drawSeriesSymbolAt(compE, eX, eCenter, Math.PI / 2);
+    drawSchematicLine(eX, eCenter + eHalf, eX, subBottom);
+
+    // Junction dots at A and B on top rail (C is rightmost so no dot at cX top)
+    drawJunctionDot(aX, T);
+    drawJunctionDot(bX, T);
+  }
+
+  function generateLevel5(levelNumber) {
+    const vcc = "RAIL_TOP_RED";
+    const gnd = "RAIL_TOP_BLUE";
+
+    const targetCount = state.level5ComponentCount;
+    const branchCount = randomItem([2, 2, 3]);
+    const branchLengths = Array(branchCount).fill(1);
+
+    let remaining = targetCount - branchCount;
+    let topRailCount = 0;
+    let botRailCount = 0;
+
+    while (remaining > 0) {
+      const opts = [];
+      if (topRailCount < 2) opts.push("top");
+      if (botRailCount < 2) opts.push("bot");
+      branchLengths.forEach((len, i) => { if (len < 2) opts.push(i); });
+      if (opts.length === 0) break;
+      const choice = randomItem(opts);
+      if (choice === "top") topRailCount++;
+      else if (choice === "bot") botRailCount++;
+      else branchLengths[choice]++;
+      remaining--;
+    }
+
+    const typeCount = {};
+    function pickSlot(polarOK = true) {
+      const pool = polarOK ? TWO_PIN_PARTS : ["RESISTOR", "SWITCH"];
+      const type = randomItem(pool);
+      typeCount[type] = (typeCount[type] || 0) + 1;
+      const idx = typeCount[type];
+      const { entryPin, exitPin } = getSeriesChainPinsForType(type);
+      return { type, instanceKey: `${type}_${idx}`, entryPin, exitPin, label: getSchematicTypeLabel(type, idx) };
+    }
+
+    const topRail = Array.from({ length: topRailCount }, () => pickSlot(true));
+    const botRail = Array.from({ length: botRailCount }, () => pickSlot(false));
+    const branches = branchLengths.map(len => Array.from({ length: len }, () => pickSlot(true)));
+
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Build the closed-loop circuit shown.`,
+      required_nets: buildLevel5RequiredNets(topRail, botRail, branches, vcc, gnd),
+      schematicStyle: "closed_loop_parallel",
+      schematicData: { topRail, botRail, branches, vcc, gnd },
+    };
+  }
+
+  function buildLevel5RequiredNets(topRail, botRail, branches, vcc, gnd) {
+    const nets = [];
+
+    let splitAnchor;
+    if (topRail.length === 0) {
+      splitAnchor = vcc;
+    } else {
+      nets.push({ from: vcc, to: `${topRail[0].instanceKey}:${topRail[0].entryPin}` });
+      for (let i = 0; i < topRail.length - 1; i++) {
+        nets.push({ from: `${topRail[i].instanceKey}:${topRail[i].exitPin}`, to: `${topRail[i + 1].instanceKey}:${topRail[i + 1].entryPin}` });
+      }
+      splitAnchor = `${topRail[topRail.length - 1].instanceKey}:${topRail[topRail.length - 1].exitPin}`;
+    }
+
+    let joinAnchor;
+    if (botRail.length === 0) {
+      joinAnchor = gnd;
+    } else {
+      for (let i = 0; i < botRail.length - 1; i++) {
+        nets.push({ from: `${botRail[i].instanceKey}:${botRail[i].exitPin}`, to: `${botRail[i + 1].instanceKey}:${botRail[i + 1].entryPin}` });
+      }
+      nets.push({ from: `${botRail[botRail.length - 1].instanceKey}:${botRail[botRail.length - 1].exitPin}`, to: gnd });
+      joinAnchor = `${botRail[0].instanceKey}:${botRail[0].entryPin}`;
+    }
+
+    for (const branch of branches) {
+      nets.push({ from: splitAnchor, to: `${branch[0].instanceKey}:${branch[0].entryPin}` });
+      for (let i = 0; i < branch.length - 1; i++) {
+        nets.push({ from: `${branch[i].instanceKey}:${branch[i].exitPin}`, to: `${branch[i + 1].instanceKey}:${branch[i + 1].entryPin}` });
+      }
+      nets.push({ from: `${branch[branch.length - 1].instanceKey}:${branch[branch.length - 1].exitPin}`, to: joinAnchor });
+    }
+
+    return nets;
   }
 
   function generateParallelMatch(levelNumber) {
