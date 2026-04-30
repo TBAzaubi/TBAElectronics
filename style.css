@@ -76,7 +76,7 @@ body {
   left: 20px;
   bottom: 20px;
   width: 500px;
-  height: 260px;
+  height: 400px;
   max-width: calc(100% - 40px);
   pointer-events: none;
   background: rgba(255, 255, 255, 0.78);
