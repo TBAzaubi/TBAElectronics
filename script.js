@@ -84,9 +84,6 @@
   const MASTER_BYPASS_PASSWORD = "0712";
   const MASTER_BYPASS_NAME = "Master/Test Mode";
   const STUDENT_NAME_OPTIONS = [
-    "Student 1",
-    "Student 2",
-    "Student 3",
     "Zaubi Test",
   ];
   const TAB_SESSION_KEY = "az_circuit_simulator_tab_session_v1";
