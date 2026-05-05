@@ -57,7 +57,12 @@
   const BODY_RADIUS_BY_TYPE = {
     BUZZER: 48,
     SWITCH: 38,
+    SLIDE_SWITCH: 25,
+    POT: 50,           // large dial body — see getPOTBodyCenter for offset logic
   };
+  const POT_BODY_RADIUS  = SPACING * 2;              // 50px — outer bezel radius
+  const POT_LEAD_LEN     = 14;                       // px from wiper pin hole to body edge
+  const POT_BODY_OFFSET  = POT_BODY_RADIUS + POT_LEAD_LEN; // 64px → short parallel leads
 
   const SPARKFUN_PINS = [
     "GND", "GND", "3V3", "0", "1", "2", "3", "4", "5", "6", "7",
@@ -67,7 +72,8 @@
   const POWER_SOURCES = ["RAIL_TOP_RED", "RAIL_BOT_RED", "MCU_3V3"];
   const GROUND_SOURCES = ["RAIL_TOP_BLUE", "RAIL_BOT_BLUE", "MCU_GND"];
   const TWO_PIN_PARTS = ["LED", "RESISTOR", "BUZZER", "SWITCH"];
-  const NON_POLARIZED_TYPES = new Set(["RESISTOR", "SWITCH"]);
+  const THREE_PIN_PARTS = ["SLIDE_SWITCH", "POT"];
+  const NON_POLARIZED_TYPES = new Set(["RESISTOR", "SWITCH", "SLIDE_SWITCH", "POT"]);
   const LIVE_PLACEMENT_ERROR_TYPES = new Set(["Bodies Overlapping", "Space Occupied", "Invalid Footprint"]);
 
   const COMPONENT_TYPES = {
@@ -76,6 +82,8 @@
     RESISTOR: { name: "Resistor" },
     BUZZER: { name: "Buzzer" },
     SWITCH: { name: "Switch" },
+    SLIDE_SWITCH: { name: "Slide Switch" },
+    POT: { name: "POT" },
   };
 
   const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxOA7knJHCd7uej4SlUpB8_vVQ7J7EUe9h1rfB0F_7IMJjNJtHK0jwcGTcq07Oj1gI/exec";
@@ -83,6 +91,8 @@
   const SPLASH_PASSWORD = "ilovezaubi";
   const MASTER_BYPASS_PASSWORD = "0712";
   const MASTER_BYPASS_NAME = "Master/Test Mode";
+  const GUEST_BYPASS_PASSWORD = "guest123";
+  const GUEST_BYPASS_NAME = "Guest Student";
   const STUDENT_NAME_OPTIONS = [
     "Zaubi Test",
   ];
@@ -97,6 +107,7 @@
     difficultyMode: "NORMAL",
     currentTool: null,
     currentRotation: "HORIZONTAL",
+    ghostHole: null,
     startHole: null,
     wires: [],
     placedComponents: [],
@@ -104,6 +115,7 @@
     currentLevelGoal: null,
     sessionID: createSessionID(),
     studentName: "",
+    isGuestMode: false,
     levelStartedAt: Date.now(),
     checkAttemptCount: 0,
     nextComponentID: 1,
@@ -118,6 +130,9 @@
     challengeInstanceID: null,
     level3Tier: 1,
     level3CorrectStreak: 0,
+    level4Tier: 1,
+    level4CorrectStreak: 0,
+    level4LastPinKey: null,   // "P1" | "CENTER" | "P2" — avoids back-to-back repeats in Tier 1
     level5ComponentCount: 4,
     level5CorrectStreak: 0,
   };
@@ -191,11 +206,30 @@
 
     dom.breadboardCanvas.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      if (state.currentTool === "BUZZER" || state.currentTool === "SWITCH") {
+      const rotatableTools = ["BUZZER", "SWITCH", "SLIDE_SWITCH", "POT"];
+      if (rotatableTools.includes(state.currentTool)) {
         state.currentRotation = state.currentRotation === "HORIZONTAL" ? "VERTICAL" : "HORIZONTAL";
         updateStatus(`Rotation: ${state.currentRotation}`);
         drawEverything();
       }
+    });
+
+    // Ghost preview: track hover hole for fixed-footprint tools
+    const GHOST_TOOLS = ["BUZZER", "SWITCH", "SLIDE_SWITCH", "POT"];
+    let ghostRafPending = false;
+    dom.breadboardCanvas.addEventListener("mousemove", (event) => {
+      if (!state.isUnlocked || !GHOST_TOOLS.includes(state.currentTool)) {
+        if (state.ghostHole !== null) { state.ghostHole = null; drawEverything(); }
+        return;
+      }
+      state.ghostHole = findNearestHole(event.clientX, event.clientY);
+      if (!ghostRafPending) {
+        ghostRafPending = true;
+        requestAnimationFrame(() => { ghostRafPending = false; drawEverything(); });
+      }
+    });
+    dom.breadboardCanvas.addEventListener("mouseleave", () => {
+      if (state.ghostHole !== null) { state.ghostHole = null; drawEverything(); }
     });
 
     document.addEventListener("visibilitychange", () => {
@@ -281,6 +315,8 @@
         actionHistory: state.actionHistory,
         level3Tier: state.level3Tier,
         level3CorrectStreak: state.level3CorrectStreak,
+        level4Tier: state.level4Tier,
+        level4CorrectStreak: state.level4CorrectStreak,
         level5ComponentCount: state.level5ComponentCount,
         level5CorrectStreak: state.level5CorrectStreak,
       }));
@@ -314,6 +350,8 @@
       state.actionHistory          = saved.actionHistory         || [];
       state.level3Tier             = saved.level3Tier             || 1;
       state.level3CorrectStreak    = saved.level3CorrectStreak   || 0;
+      state.level4Tier             = saved.level4Tier             || 1;
+      state.level4CorrectStreak    = saved.level4CorrectStreak   || 0;
       state.level5ComponentCount   = saved.level5ComponentCount  || 4;
       state.level5CorrectStreak    = saved.level5CorrectStreak   || 0;
       return true;
@@ -387,6 +425,7 @@
   function lockSimulator() {
     state.isUnlocked = false;
     state.studentName = "";
+    state.isGuestMode = false;
     clearTabSession();
     clearBoardState();
     if (dom.appContainer) dom.appContainer.classList.add("is-locked");
@@ -421,25 +460,29 @@
     const selectedStudent = dom.studentSelect.value.trim();
     const enteredPassword = dom.splashPassword.value;
     const isMasterBypass = Boolean(MASTER_BYPASS_PASSWORD) && enteredPassword === MASTER_BYPASS_PASSWORD;
+    const isGuestBypass  = Boolean(GUEST_BYPASS_PASSWORD)  && enteredPassword === GUEST_BYPASS_PASSWORD;
 
-    if (!isMasterBypass && !selectedStudent) {
+    if (!isMasterBypass && !isGuestBypass && !selectedStudent) {
       dom.splashError.textContent = "Select a student name before entering the simulator.";
       dom.studentSelect.focus();
       return;
     }
 
-    if (!isMasterBypass && SPLASH_PASSWORD && enteredPassword !== SPLASH_PASSWORD) {
+    if (!isMasterBypass && !isGuestBypass && SPLASH_PASSWORD && enteredPassword !== SPLASH_PASSWORD) {
       dom.splashError.textContent = "Incorrect password.";
       dom.splashPassword.select();
       return;
     }
 
+    state.isGuestMode = isGuestBypass;
     state.sessionID = createSessionID();
     state.level3Tier = 1;
     state.level3CorrectStreak = 0;
+    state.level4Tier = 1;
+    state.level4CorrectStreak = 0;
     state.level5ComponentCount = 4;
     state.level5CorrectStreak = 0;
-    unlockSimulator(isMasterBypass ? MASTER_BYPASS_NAME : selectedStudent);
+    unlockSimulator(isMasterBypass ? MASTER_BYPASS_NAME : isGuestBypass ? GUEST_BYPASS_NAME : selectedStudent);
     saveBoardState(); // persist tier/streak reset immediately so a reload won't restore stale values
   }
 
@@ -471,6 +514,16 @@
 
   function isNonPolarizedType(type) {
     return NON_POLARIZED_TYPES.has(type);
+  }
+
+  function isThreePinType(type) {
+    return THREE_PIN_PARTS.includes(type);
+  }
+
+  function getCenterPinLabel(type) {
+    if (type === "SLIDE_SWITCH") return "Common";
+    if (type === "POT") return "Wiper";
+    return "mid";
   }
 
   function resetLevelSessionState() {
@@ -613,6 +666,7 @@
   }
 
   function beaconExportRow(row) {
+    if (state.isGuestMode) return;
     try {
       const params = new URLSearchParams({
         rows: JSON.stringify([mapExportRowToScriptParams(row)]),
@@ -626,6 +680,7 @@
   }
 
   function beaconExportRows(rows) {
+    if (state.isGuestMode) return;
     try {
       const params = new URLSearchParams({
         rows: JSON.stringify(buildBatchExportRows(rows)),
@@ -852,10 +907,12 @@
     if (state.currentTool === tool) {
       state.currentTool = null;
       state.startHole = null;
+      state.ghostHole = null;
       updateStatus("LOAD a challenge to begin");
     } else {
       state.currentTool = tool;
       state.startHole = null;
+      state.ghostHole = null;
 
       switch (tool) {
         case "WIRE":
@@ -870,6 +927,10 @@
         case "BUZZER":
         case "SWITCH":
           updateStatus(`${COMPONENT_TYPES[tool].name}: Left click to place, right click to rotate`);
+          break;
+        case "SLIDE_SWITCH":
+        case "POT":
+          updateStatus(`${COMPONENT_TYPES[tool].name}: Click the center pin hole — right-click to rotate`);
           break;
         case "TRASH":
           updateStatus("Trash: Click a component or wire to remove it");
@@ -1106,9 +1167,31 @@
     const occupiedByWire = state.wires.some((wire) => sameHole(wire.from, hole) || sameHole(wire.to, hole));
     if (occupiedByWire) return true;
 
-    return state.placedComponents.some(
-      (component) => sameHole(component.from, hole) || sameHole(component.to, hole)
-    );
+    return state.placedComponents.some((component) => {
+      // Exact pin match (always checked for all component types)
+      if (sameHole(component.from, hole) || sameHole(component.to, hole)) return true;
+      if (component.mid && sameHole(component.mid, hole)) return true;
+
+      // POT: block any hole that falls inside the dial body (body is offset from mid pin)
+      if (component.type === "POT" && component.mid) {
+        const bc = getPOTBodyCenter(component);
+        if (bc && Math.hypot(hole.x - bc.x, hole.y - bc.y) < bc.r) return true;
+      }
+
+      return false;
+    });
+  }
+
+  // Returns the body-circle centre and radius for a placed POT.
+  // The body is offset away from the pin column/row so that pins land at the body edge.
+  function getPOTBodyCenter(comp) {
+    if (!comp || !comp.mid) return null;
+    const isVert = comp.from && comp.to && Math.abs(comp.from.x - comp.to.x) < 1;
+    if (isVert) {
+      return { x: comp.mid.x - POT_BODY_OFFSET, y: comp.mid.y, r: POT_BODY_RADIUS };
+    } else {
+      return { x: comp.mid.x, y: comp.mid.y - POT_BODY_OFFSET, r: POT_BODY_RADIUS };
+    }
   }
 
   function sameHole(a, b) {
@@ -1144,6 +1227,11 @@
 
     if (state.currentTool === "BUZZER" || state.currentTool === "SWITCH") {
       handleLargeComponentPlacement(hole);
+      return;
+    }
+
+    if (state.currentTool === "SLIDE_SWITCH" || state.currentTool === "POT") {
+      handleThreePinPlacement(hole);
       return;
     }
 
@@ -1203,9 +1291,19 @@
       if (component.type === "LED" || component.type === "RESISTOR") {
         const lineDistance = getDistanceToSegment(mouseX, mouseY, from.x, from.y, to.x, to.y);
         const centerDistance = Math.hypot(mouseX - midX, mouseY - midY);
-
         const clickedBody = lineDistance <= 9 && centerDistance <= 20;
         distance = clickedBody ? centerDistance : Infinity;
+      } else if (component.type === "POT") {
+        // Hit-test the dial body (offset from mid pin) as well as the pin holes
+        const bc = getPOTBodyCenter(component);
+        const bodyDist = bc ? Math.hypot(mouseX - bc.x, mouseY - bc.y) : Infinity;
+        const pinDist  = Math.min(
+          Math.hypot(mouseX - from.x, mouseY - from.y),
+          Math.hypot(mouseX - to.x,   mouseY - to.y),
+          Math.hypot(mouseX - midX,   mouseY - midY)
+        );
+        // Accept body click if inside bezel; pin holes use standard threshold
+        distance = bodyDist <= bc.r ? bodyDist : pinDist;
       } else {
         distance = Math.min(
           Math.hypot(mouseX - from.x, mouseY - from.y),
@@ -1332,6 +1430,81 @@
     drawEverything();
   }
 
+  function handleThreePinPlacement(hole) {
+    if (!hole) return;
+
+    // 3-pin components can only land on standard board rows, not rails
+    if (hole.isRail || !hole.rowLabel) {
+      setPlacementError("Invalid Footprint", "3-pin components must be placed on board rows, not power rails.");
+      return;
+    }
+
+    const rotation = state.currentRotation;
+    const colIndex = hole.col - 1; // col is 1-based
+    const rowIndex = getRowIndexByLabel(hole.rowLabel);
+
+    // The clicked hole becomes the CENTER (mid) pin.
+    // P1 (from) and P2 (to) are placed one step behind and ahead respectively.
+    let fromHole, midHole, toHole;
+
+    if (rotation === "HORIZONTAL") {
+      if (colIndex < 1 || colIndex + 1 >= TOTAL_COLUMNS) {
+        setPlacementError("Invalid Footprint", "Not enough room — click a hole at least one column from each edge.");
+        return;
+      }
+      fromHole = createStandardHole(colIndex - 1, rowIndex);
+      midHole  = hole;
+      toHole   = createStandardHole(colIndex + 1, rowIndex);
+    } else {
+      // VERTICAL: P1 one row above the clicked hole, P2 one row below
+      if (rowIndex < 1 || rowIndex + 1 >= TOTAL_ROWS) {
+        setPlacementError("Invalid Footprint", "Not enough room — click a hole at least one row from each edge.");
+        return;
+      }
+      // Guard: P1 and P2 must be in the same board half (no crossing the center trench)
+      const fromHalf = (rowIndex - 1) <= 4 ? 0 : 1;
+      const toHalf   = (rowIndex + 1) <= 4 ? 0 : 1;
+      if (fromHalf !== toHalf) {
+        setPlacementError("Crosses Trench", "This placement would span the center trench — move one row up or down.");
+        return;
+      }
+      fromHole = createStandardHole(colIndex, rowIndex - 1);
+      midHole  = hole;
+      toHole   = createStandardHole(colIndex, rowIndex + 1);
+    }
+
+    if (!fromHole || !toHole) {
+      setPlacementError("Invalid Footprint", "Could not compute pin positions — try a different hole.");
+      return;
+    }
+
+    if (isHoleOccupied(fromHole)) {
+      setPlacementError("Space Occupied", "The P1 hole is already occupied.");
+      drawEverything(); drawOccupiedHoleIndicator(fromHole); return;
+    }
+    if (isHoleOccupied(midHole)) {
+      setPlacementError("Space Occupied", "The center hole is already occupied.");
+      drawEverything(); drawOccupiedHoleIndicator(midHole); return;
+    }
+    if (isHoleOccupied(toHole)) {
+      setPlacementError("Space Occupied", "The P2 hole is already occupied.");
+      drawEverything(); drawOccupiedHoleIndicator(toHole); return;
+    }
+
+    clearPlacementError();
+    addComponent({
+      type: state.currentTool,
+      from: fromHole,
+      mid:  midHole,
+      to:   toHole,
+      rotation,
+    });
+
+    setSignatureVisible(false);
+    updateStatus(`${COMPONENT_TYPES[state.currentTool].name} placed.`);
+    drawEverything();
+  }
+
   function findLargeComponentTargetHole(startHole, tool, rotation) {
     const startRowIndex = getRowIndexByLabel(startHole.rowLabel);
     const startColIndex = startHole.col - 1;
@@ -1409,6 +1582,7 @@
     drawWires();
     drawComponents();
     drawStartHoleIndicator();
+    drawGhostComponent();
 
     bbCtx.restore();
   }
@@ -1549,10 +1723,77 @@
         case "SWITCH":
           drawSwitch(bbCtx, from, to);
           break;
+        case "SLIDE_SWITCH":
+          drawSlideSwitch(bbCtx, from, { x: component.mid.x, y: component.mid.y }, to, component.rotation);
+          break;
+        case "POT":
+          drawPOT(bbCtx, from, { x: component.mid.x, y: component.mid.y }, to, component.rotation);
+          break;
         default:
           break;
       }
     });
+  }
+
+  // Returns placement geometry for ghost preview — pure, no side effects.
+  function computeGhostPlacement(tool, rotation, hole) {
+    if (!hole || hole.isRail || !hole.rowLabel) return null;
+    const colIndex = hole.col - 1;
+    const rowIndex = getRowIndexByLabel(hole.rowLabel);
+
+    if (tool === "BUZZER" || tool === "SWITCH") {
+      const toHole = findLargeComponentTargetHole(hole, tool, rotation);
+      return { valid: toHole !== null, from: hole, to: toHole || hole };
+    }
+
+    // SLIDE_SWITCH / POT — clicked hole is mid pin
+    if (rotation === "HORIZONTAL") {
+      if (colIndex < 1 || colIndex + 1 >= TOTAL_COLUMNS)
+        return { valid: false, from: hole, mid: hole, to: hole };
+      return {
+        valid: true,
+        from: createStandardHole(colIndex - 1, rowIndex),
+        mid:  hole,
+        to:   createStandardHole(colIndex + 1, rowIndex),
+      };
+    } else {
+      if (rowIndex < 1 || rowIndex + 1 >= TOTAL_ROWS)
+        return { valid: false, from: hole, mid: hole, to: hole };
+      const fromHalf = (rowIndex - 1) <= 4 ? 0 : 1;
+      const toHalf   = (rowIndex + 1) <= 4 ? 0 : 1;
+      if (fromHalf !== toHalf)
+        return { valid: false, from: hole, mid: hole, to: hole };
+      return {
+        valid: true,
+        from: createStandardHole(colIndex, rowIndex - 1),
+        mid:  hole,
+        to:   createStandardHole(colIndex, rowIndex + 1),
+      };
+    }
+  }
+
+  function drawGhostComponent() {
+    const GHOST_TOOLS = ["BUZZER", "SWITCH", "SLIDE_SWITCH", "POT"];
+    if (!GHOST_TOOLS.includes(state.currentTool) || !state.ghostHole) return;
+
+    const placement = computeGhostPlacement(state.currentTool, state.currentRotation, state.ghostHole);
+    if (!placement) return;
+
+    const f = { x: placement.from.x, y: placement.from.y };
+    const t = { x: placement.to.x,   y: placement.to.y };
+    const m = placement.mid ? { x: placement.mid.x, y: placement.mid.y } : null;
+
+    bbCtx.save();
+    bbCtx.globalAlpha = placement.valid ? 0.45 : 0.2;
+
+    switch (state.currentTool) {
+      case "BUZZER":      drawBuzzer(bbCtx, f, t);                                   break;
+      case "SWITCH":      drawSwitch(bbCtx, f, t);                                   break;
+      case "SLIDE_SWITCH": drawSlideSwitch(bbCtx, f, m, t, state.currentRotation);  break;
+      case "POT":         drawPOT(bbCtx, f, m, t, state.currentRotation);           break;
+    }
+
+    bbCtx.restore();
   }
 
   function drawStartHoleIndicator() {
@@ -1710,11 +1951,192 @@
     ctx.stroke();
     ctx.restore();
 
-    ctx.fillStyle = "#ecf0f1";
+    [from, to].forEach((hole) => {
+      ctx.beginPath();
+      ctx.arc(hole.x, hole.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.strokeStyle = "#2c3e50";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+  }
+
+  function drawSlideSwitch(ctx, from, mid, to, rotation = "HORIZONTAL") {
+    // Body spans all 3 holes; center at the mid hole.
+    // For VERTICAL placement the body is rotated 90° so the slide track runs vertically.
+    const bodyW = SPACING * 2.4;  // long axis (along the slide direction)
+    const bodyH = SPACING * 1.4;  // short axis
+    const cx = mid.x;
+    const cy = mid.y;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    if (rotation === "VERTICAL") ctx.rotate(Math.PI / 2);
+
+    // Body
+    ctx.fillStyle = "#2c3e50";
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = "rgba(0,0,0,0.4)";
+    roundRect(ctx, -bodyW / 2, -bodyH / 2, bodyW, bodyH, 4, true, false);
+    ctx.shadowBlur = 0;
+
+    // Slider actuator
+    ctx.fillStyle = "#95a5a6";
+    roundRect(ctx, -8, -bodyH / 2 + 3, 16, bodyH - 6, 3, true, false);
+
+    // Slide track line
+    ctx.strokeStyle = "#1a252f";
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(from.x, from.y, 3, 0, Math.PI * 2);
-    ctx.arc(to.x, to.y, 3, 0, Math.PI * 2);
+    ctx.moveTo(-bodyW / 2 + 6, 0);
+    ctx.lineTo(bodyW / 2 - 6, 0);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // Pin dots (always drawn at the actual hole positions, unaffected by rotation)
+    [from, mid, to].forEach((hole) => {
+      ctx.beginPath();
+      ctx.arc(hole.x, hole.y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.strokeStyle = "#2c3e50";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+  }
+
+  function drawPOT(ctx, from, mid, to, rotation = "HORIZONTAL") {
+    const outerR   = POT_BODY_RADIUS;         // 50px — dark bezel
+    const innerR   = outerR - 7;              // 43px — blue dial face
+    const tickR    = innerR - 4;              // 39px — outer tick radius
+    const tickInR  = tickR - 8;              // 31px — inner tick radius
+    const numTicks = 25;
+
+    // Detect actual orientation from pin positions (same column = vertical)
+    const isVert = Math.abs(from.x - to.x) < 1;
+
+    // Body centre: offset away from the pin column/row
+    const bodyCX = isVert ? mid.x - POT_BODY_OFFSET : mid.x;
+    const bodyCY = isVert ? mid.y                    : mid.y - POT_BODY_OFFSET;
+
+    // ── Leads: parallel lines from each pin to the body-circle edge ──
+    // All leads run in the same axis (horizontal for VERTICAL orientation, vertical for HORIZONTAL).
+    // The endpoint is the exact circle-intersection so leads terminate flush at the bezel.
+    ctx.strokeStyle = "#7f8c8d";
+    ctx.lineWidth   = 4;
+    ctx.lineCap     = "round";
+    [from, mid, to].forEach((pin) => {
+      ctx.beginPath();
+      ctx.moveTo(pin.x, pin.y);
+      if (isVert) {
+        // Horizontal lead: compute x where the horizontal line y=pin.y meets the body circle
+        const dy   = pin.y - bodyCY;
+        const disc = outerR * outerR - dy * dy;
+        if (disc >= 0) {
+          const edgeX = bodyCX + Math.sqrt(disc);   // rightmost intersection
+          ctx.lineTo(edgeX, pin.y);
+        }
+      } else {
+        // Vertical lead: compute y where the vertical line x=pin.x meets the body circle
+        const dx   = pin.x - bodyCX;
+        const disc = outerR * outerR - dx * dx;
+        if (disc >= 0) {
+          const edgeY = bodyCY + Math.sqrt(disc);   // bottom intersection
+          ctx.lineTo(pin.x, edgeY);
+        }
+      }
+      ctx.stroke();
+    });
+    ctx.lineCap = "butt";
+
+    // ── Body ──
+    ctx.save();
+    ctx.translate(bodyCX, bodyCY);
+
+    // Drop shadow
+    ctx.shadowBlur  = 10;
+    ctx.shadowColor = "rgba(0,0,0,0.55)";
+    ctx.fillStyle   = "#1c2833";
+    ctx.beginPath();
+    ctx.arc(0, 0, outerR, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Bezel highlight ring
+    ctx.strokeStyle = "#4d5f6e";
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, outerR - 1.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner bezel recess (dark groove between bezel edge and face)
+    ctx.strokeStyle = "#111820";
+    ctx.lineWidth   = 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, innerR + 3, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Inner dial face — radial gradient
+    const faceGrad = ctx.createRadialGradient(0, -innerR * 0.25, innerR * 0.05, 0, 0, innerR);
+    faceGrad.addColorStop(0, "#5b9ec9");
+    faceGrad.addColorStop(1, "#1a5276");
+    ctx.fillStyle = faceGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tick marks: 270° sweep clockwise from lower-left (135°) to lower-right (45°), gap at bottom
+    // Canvas 0°=right; 135° = lower-left, sweeping CW through top.
+    const startAng = (3 * Math.PI) / 4;   // 135°
+    const sweepAng = (3 * Math.PI) / 2;   // 270°
+    ctx.strokeStyle = "#a9cce3";
+    for (let i = 0; i < numTicks; i++) {
+      const angle   = startAng + (sweepAng / (numTicks - 1)) * i;
+      const isMajor = i % 6 === 0;
+      const innerR2 = isMajor ? tickInR - 3 : tickInR;
+      ctx.lineWidth = isMajor ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * innerR2, Math.sin(angle) * innerR2);
+      ctx.lineTo(Math.cos(angle) * tickR,   Math.sin(angle) * tickR);
+      ctx.stroke();
+    }
+
+    // Wiper pointer — dark wedge pointing straight up (noon = -π/2 canvas)
+    const pAngle    = -Math.PI / 2;
+    const pLen      = innerR - 5;
+    const pBase     = 6;
+    const pCos      = Math.cos(pAngle);
+    const pSin      = Math.sin(pAngle);
+    const pPerpCos  = Math.cos(pAngle + Math.PI / 2);
+    const pPerpSin  = Math.sin(pAngle + Math.PI / 2);
+    ctx.fillStyle   = "#1c2833";
+    ctx.beginPath();
+    ctx.moveTo( pCos * pLen,         pSin * pLen);
+    ctx.lineTo( pPerpCos * pBase,    pPerpSin * pBase);
+    ctx.lineTo(-pPerpCos * pBase,   -pPerpSin * pBase);
+    ctx.closePath();
+    ctx.fill();
+
+    // Centre hub
+    ctx.fillStyle = "#85929e";
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    // ── Pin holes drawn on top of everything at their actual breadboard positions ──
+    [from, mid, to].forEach((hole) => {
+      ctx.fillStyle   = "#0e141b";
+      ctx.strokeStyle = "#7f8c8d";
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.arc(hole.x, hole.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
   }
 
   function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
@@ -1775,6 +2197,18 @@
       drawOpenParallelFork3Schematic(state.currentLevelGoal);
       return;
     }
+    if (state.currentLevelGoal.schematicStyle === "three_pin_tier1") {
+      drawThreePinTier1Schematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "three_pin_tier2") {
+      drawThreePinTier2Schematic(state.currentLevelGoal);
+      return;
+    }
+    if (state.currentLevelGoal.schematicStyle === "three_pin_tier3") {
+      drawThreePinTier3Schematic(state.currentLevelGoal);
+      return;
+    }
 
     schematicCtx.font = "12px Arial";
     schematicCtx.fillStyle = "#374151";
@@ -1795,9 +2229,23 @@
     });
   }
 
+  // Returns the shared label prefix for a component type.
+  // SLIDE_SWITCH shares "S" with SWITCH; POT shares "R" with RESISTOR.
+  function getSchematicPrefix(type) {
+    const map = { RESISTOR: "R", POT: "R", LED: "L", BUZZER: "BZ", SWITCH: "S", SLIDE_SWITCH: "S" };
+    return map[type] || type;
+  }
+
   function getSchematicTypeLabel(type, index = 1) {
-    const prefixes = { RESISTOR: "R", LED: "L", BUZZER: "BZ", SWITCH: "S" };
-    return `${prefixes[type] || type}${index}`;
+    return `${getSchematicPrefix(type)}${index}`;
+  }
+
+  // Returns true if the element's connected pin is the "entry" (Anode / Positive / P1) side.
+  // Used by 3-pin schematic renderers to orient 2-pin element symbols correctly.
+  function isEntryPin(element) {
+    if (element.type === "LED")    return element.pin === "Anode";
+    if (element.type === "BUZZER") return element.pin === "Positive";
+    return true; // RESISTOR, SWITCH — non-polarized, treat P1 as entry
   }
 
   function getSeriesChainPinsForType(type) {
@@ -2513,15 +2961,18 @@
   }
 
   function parseComponentDescriptor(baseDescriptor) {
-    const match = /^([A-Z]+?)(?:_(\d+))?$/.exec(baseDescriptor);
-    if (!match) {
-      return { type: baseDescriptor, instanceKey: baseDescriptor, instanceIndex: 1 };
+    // Match a trailing _N (digits only) as the instance index; everything before it is the type.
+    // This correctly handles multi-word types like SLIDE_SWITCH_1 → type=SLIDE_SWITCH, index=1.
+    const match = /^(.+?)_(\d+)$/.exec(baseDescriptor);
+    if (match) {
+      return {
+        type: match[1],
+        instanceKey: baseDescriptor,
+        instanceIndex: Number(match[2]),
+      };
     }
-    return {
-      type: match[1],
-      instanceKey: match[2] ? `${match[1]}_${match[2]}` : match[1],
-      instanceIndex: match[2] ? Number(match[2]) : 1,
-    };
+    // No trailing _N: treat whole string as type with implicit index 1
+    return { type: baseDescriptor, instanceKey: baseDescriptor, instanceIndex: 1 };
   }
 
   function parseEndpoint(descriptor) {
@@ -2577,12 +3028,22 @@
     }
 
     if (isNonPolarizedType(component.type)) {
+      // 3-pin types: center pin (Common / Wiper) always maps to component.mid
+      if (component.mid) {
+        const centerLabel = getCenterPinLabel(component.type);
+        if (pinLabel === centerLabel) return component.mid.netID;
+      }
+
       const flipped = Boolean(config.orientationByComponentID[component.id]);
       const map = flipped
         ? { P1: component.to.netID, P2: component.from.netID }
         : { P1: component.from.netID, P2: component.to.netID };
 
-      if (pinLabel === "ANY") return [map.P1, map.P2];
+      if (pinLabel === "ANY") {
+        const nets = [map.P1, map.P2];
+        if (component.mid) nets.push(component.mid.netID);
+        return nets;
+      }
       return map[pinLabel];
     }
 
@@ -2597,10 +3058,16 @@
     if (type === "BUZZER") {
       return pin === "P1" ? "Positive" : pin === "P2" ? "Negative" : pin;
     }
+    // 3-pin types: center pin label passes through; outer pins stay as P1/P2
     return pin;
   }
 
   function getLogicalPinLabelForLead(component, leadSide, config) {
+    // 3-pin types: center lead ("mid") is always the type's center pin label
+    if (isThreePinType(component.type) && leadSide === "mid") {
+      return getCenterPinLabel(component.type);
+    }
+
     if (isNonPolarizedType(component.type)) {
       const flipped = Boolean(config.orientationByComponentID[component.id]);
       if (!flipped) return leadSide === "from" ? "P1" : "P2";
@@ -2639,7 +3106,12 @@
     if (!component) return [];
 
     if (endpoint.pin === "ANY") {
-      return ["P1", "P2"].map((logicalPin) => ({
+      const pins = ["P1", "P2"];
+      // 3-pin components: also expand the center pin
+      if (isThreePinType(component.type)) {
+        pins.push(getCenterPinLabel(component.type));
+      }
+      return pins.map((logicalPin) => ({
         kind: "component",
         descriptor,
         component,
@@ -2731,6 +3203,10 @@
       }
       if (group.has(component.to.netID)) {
         logicalPinsInGroup.push(getLogicalPinLabelForLead(component, "to", config));
+      }
+      // 3-pin support: check the center (mid) lead
+      if (component.mid && group.has(component.mid.netID)) {
+        logicalPinsInGroup.push(getLogicalPinLabelForLead(component, "mid", config));
       }
 
       if (logicalPinsInGroup.length === 0) return;
@@ -2849,12 +3325,27 @@
   function detectShortCircuitIssues(config, getGroup) {
     const issues = [];
     state.placedComponents.forEach((component) => {
-      const group = getGroup(component.from.netID);
-      if (group.has(component.to.netID)) {
-        issues.push(makeAuditEntry(
-          "Short Circuit",
-          `${component.type} is shorted because both leads are electrically common.`
-        ));
+      const fromGroup = getGroup(component.from.netID);
+
+      if (component.mid) {
+        // 3-pin: a short exists if any two of the three pins are in the same electrical group
+        const fromToShorted = fromGroup.has(component.to.netID);
+        const fromMidShorted = fromGroup.has(component.mid.netID);
+        const midToShorted = getGroup(component.mid.netID).has(component.to.netID);
+
+        if (fromToShorted || fromMidShorted || midToShorted) {
+          issues.push(makeAuditEntry(
+            "Short Circuit",
+            `${component.type} is shorted — multiple pins share the same electrical node.`
+          ));
+        }
+      } else {
+        if (fromGroup.has(component.to.netID)) {
+          issues.push(makeAuditEntry(
+            "Short Circuit",
+            `${component.type} is shorted because both leads are electrically common.`
+          ));
+        }
       }
     });
     return issues;
@@ -2884,6 +3375,7 @@
     if (!component) return null;
 
     const groupsToCheck = [getGroup(component.from.netID), getGroup(component.to.netID)];
+    if (component.mid) groupsToCheck.push(getGroup(component.mid.netID));
     const wrongPins = new Set();
     groupsToCheck.forEach((group) => {
       Array.from(group)
@@ -2991,9 +3483,19 @@
     // the Short Circuit error already covers them.
     const shortedLeadTokens = new Set();
     state.placedComponents.forEach((component) => {
-      if (getGroup(component.from.netID).has(component.to.netID)) {
+      const fromGroup = getGroup(component.from.netID);
+      const isShorted = component.mid
+        ? (fromGroup.has(component.to.netID) ||
+           fromGroup.has(component.mid.netID) ||
+           getGroup(component.mid.netID).has(component.to.netID))
+        : fromGroup.has(component.to.netID);
+
+      if (isShorted) {
         shortedLeadTokens.add(buildComponentLeadToken(component, getLogicalPinLabelForLead(component, "from", bestConfig)));
         shortedLeadTokens.add(buildComponentLeadToken(component, getLogicalPinLabelForLead(component, "to", bestConfig)));
+        if (component.mid) {
+          shortedLeadTokens.add(buildComponentLeadToken(component, getLogicalPinLabelForLead(component, "mid", bestConfig)));
+        }
       }
     });
 
@@ -3026,7 +3528,9 @@
     const expectedMCUNets = new Set(state.currentLevelGoal.required_nets.flatMap((requirement) => [requirement.from, requirement.to]).filter((descriptor) => descriptor.startsWith("MCU_")));
     const inspectedUnexpectedMCUNets = new Set();
     state.placedComponents.forEach((component) => {
-      [component.from.netID, component.to.netID].forEach((netID) => {
+      const netIDsToCheck = [component.from.netID, component.to.netID];
+      if (component.mid) netIDsToCheck.push(component.mid.netID);
+      netIDsToCheck.forEach((netID) => {
         if (!netID.startsWith("MCU_") || expectedMCUNets.has(netID) || inspectedUnexpectedMCUNets.has(netID)) return;
         const group = getGroup(netID);
         const participants = getGroupParticipants(group, bestConfig);
@@ -3135,6 +3639,17 @@
           state.level3CorrectStreak = 0;
         }
       }
+      if (getCurrentLevelID() === 4) {
+        if (firstTrySuccess) {
+          state.level4CorrectStreak += 1;
+          if (state.level4CorrectStreak >= 2 && state.level4Tier < 3) {
+            state.level4Tier += 1;
+            state.level4CorrectStreak = 0;
+          }
+        } else {
+          state.level4CorrectStreak = 0;
+        }
+      }
       if (getCurrentLevelID() === 5) {
         if (firstTrySuccess) {
           state.level5CorrectStreak += 1;
@@ -3151,8 +3666,8 @@
       clearActiveAuditStack();
       state.lastSuccessExportRows = buildSuccessExportRows();
 
-      const exportWindow = openExportPopupShell();
-      const exported = exportSuccessRowsToGoogleScript(
+      const exportWindow = state.isGuestMode ? null : openExportPopupShell();
+      const exported = state.isGuestMode ? false : exportSuccessRowsToGoogleScript(
         state.lastSuccessExportRows,
         exportWindow
       );
@@ -3183,6 +3698,7 @@
     // Any failed check breaks the "perfect run" streak — the student must
     // complete consecutive challenges with zero audit errors from the first try.
     if (getCurrentLevelID() === 3) state.level3CorrectStreak = 0;
+    if (getCurrentLevelID() === 4) state.level4CorrectStreak = 0;
     if (getCurrentLevelID() === 5) state.level5CorrectStreak = 0;
     saveBoardState(); // persist the reset streak so a reload can't resurrect it
 
@@ -3242,7 +3758,7 @@
       case 3:
         return generateLevel3(levelNumber);
       case 4:
-        return generateLevel4Placeholder(levelNumber);
+        return generateLevel4(levelNumber);
       case 5:
         return generateLevel5(levelNumber);
       case 6:
@@ -3253,11 +3769,224 @@
     }
   }
 
-  function generateLevel4Placeholder(levelNumber) {
+  // ============================================================
+  // LEVEL 4 — 3-PIN COMPONENTS (TIER-BASED)
+  // ============================================================
+  function generateLevel4(levelNumber) {
+    const tier = state.level4Tier;
+    if (tier === 1) return generateLevel4Tier1(levelNumber);
+    if (tier === 2) return generateLevel4Tier2(levelNumber);
+    return generateLevel4Tier3(levelNumber);
+  }
+
+  // Tier 1: Place the 3-pin component and connect ONE of its three pins to a 2-pin element.
+  // Any of the 3 pins can be chosen; if an outer pin (P1/P2) is chosen, either outer pin
+  // is accepted by the checker (non-polarized outer pins are already reversible).
+  function generateLevel4Tier1(levelNumber) {
+    const threePcType  = randomItem(THREE_PIN_PARTS);
+    const centerPin    = getCenterPinLabel(threePcType);
+
+    // Shared prefix counter — SLIDE_SWITCH & SWITCH both use "S"; POT & RESISTOR both use "R"
+    const prefixCount = {};
+    function nextLabel(type) {
+      const prefix = getSchematicPrefix(type);
+      prefixCount[prefix] = (prefixCount[prefix] || 0) + 1;
+      const idx = prefixCount[prefix];
+      return { label: `${prefix}${idx}`, idx };
+    }
+
+    const { label: label3pc, idx: idx3pc } = nextLabel(threePcType);
+    const threePcKey = `${threePcType}_${idx3pc}`;
+
+    // Pick which pin of the 3-pin component this challenge uses.
+    // Normalize to "P1" | "CENTER" | "P2" to avoid repeating the same position
+    // two challenges in a row, regardless of whether it's Common vs Wiper.
+    const pinKeys  = ["P1", "CENTER", "P2"];
+    const lastKey  = state.level4LastPinKey;
+    const available = lastKey ? pinKeys.filter(k => k !== lastKey) : pinKeys;
+    const chosenKey = randomItem(available);
+    state.level4LastPinKey = chosenKey;
+    const connectedPin = chosenKey === "CENTER" ? centerPin : chosenKey;
+
+    function pick2pin() {
+      const type = randomItem(TWO_PIN_PARTS);
+      const { label, idx } = nextLabel(type);
+      const pin = getRandomPinForPart(type);
+      return { type, instanceKey: `${type}_${idx}`, label, pin };
+    }
+
+    const other = pick2pin();
+
+    // Human-readable pin description for the instruction text
+    const pinLabel = connectedPin === centerPin ? `center pin (${centerPin})` : `pin ${connectedPin}`;
+
     return {
       id: levelNumber,
-      instructions: `Level ${levelNumber}: Coming soon.`,
-      required_nets: [],
+      instructions: `Level ${levelNumber}: Connect the ${label3pc}'s ${pinLabel} to ${formatInstructionEndpoint(other.type, other.pin)}.`,
+      required_nets: [
+        { from: `${threePcKey}:${connectedPin}`, to: `${other.instanceKey}:${other.pin}` },
+      ],
+      schematicStyle: "three_pin_tier1",
+      schematicData: {
+        threePc: { type: threePcType, instanceKey: threePcKey, label: label3pc, centerPin },
+        connectedPin,
+        other,
+      },
+    };
+  }
+
+  // Tier 2: All 3 pins of the 3-pin component each connect to a different 2-pin element.
+  function generateLevel4Tier2(levelNumber) {
+    const threePcType = randomItem(THREE_PIN_PARTS);
+    const centerPin   = getCenterPinLabel(threePcType);
+
+    const prefixCount = {};
+    function nextLabel(type) {
+      const prefix = getSchematicPrefix(type);
+      prefixCount[prefix] = (prefixCount[prefix] || 0) + 1;
+      const idx = prefixCount[prefix];
+      return { label: `${prefix}${idx}`, idx };
+    }
+
+    const { label: label3pc, idx: idx3pc } = nextLabel(threePcType);
+    const threePcKey = `${threePcType}_${idx3pc}`;
+
+    function pick2pin() {
+      const type = randomItem(TWO_PIN_PARTS);
+      const { label, idx } = nextLabel(type);
+      const pin = getRandomPinForPart(type);
+      return { type, instanceKey: `${type}_${idx}`, label, pin };
+    }
+
+    const compLeft   = pick2pin(); // connects to P1
+    const compCenter = pick2pin(); // connects to Common / Wiper
+    const compRight  = pick2pin(); // connects to P2
+
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Connect all three pins of the ${label3pc} to separate elements.`,
+      required_nets: [
+        { from: `${threePcKey}:P1`,        to: `${compLeft.instanceKey}:${compLeft.pin}` },
+        { from: `${threePcKey}:${centerPin}`, to: `${compCenter.instanceKey}:${compCenter.pin}` },
+        { from: `${threePcKey}:P2`,        to: `${compRight.instanceKey}:${compRight.pin}` },
+      ],
+      schematicStyle: "three_pin_tier2",
+      schematicData: {
+        threePc: { type: threePcType, instanceKey: threePcKey, label: label3pc, centerPin },
+        compLeft,
+        compCenter,
+        compRight,
+      },
+    };
+  }
+
+  // Tier 3: Closed loop.  Two topologies are chosen at random with equal probability.
+  //
+  //  "p1center" — two pins used, P2 floats:
+  //    VCC → chain-top → 3PC:P1 → 3PC:center → chain-right → GND
+  //
+  //  "allpins"  — all three pins used (Y-junction):
+  //    VCC → chain-top → 3PC:Common
+  //    3PC:P1 → chain-P1 → GND
+  //    3PC:P2 → chain-P2 → GND
+  //
+  function generateLevel4Tier3(levelNumber) {
+    const threePcType = randomItem(THREE_PIN_PARTS);
+    const centerPin   = getCenterPinLabel(threePcType);
+
+    const prefixCount = {};
+    function nextLabel(type) {
+      const prefix = getSchematicPrefix(type);
+      prefixCount[prefix] = (prefixCount[prefix] || 0) + 1;
+      const idx = prefixCount[prefix];
+      return { label: `${prefix}${idx}`, idx };
+    }
+
+    const { label: label3pc, idx: idx3pc } = nextLabel(threePcType);
+    const threePcKey = `${threePcType}_${idx3pc}`;
+
+    function pick2pin() {
+      const type = randomItem(TWO_PIN_PARTS);
+      const { label, idx } = nextLabel(type);
+      const { entryPin, exitPin } = getSeriesChainPinsForType(type);
+      return { type, instanceKey: `${type}_${idx}`, label, entryPin, exitPin };
+    }
+
+    const topology = Math.random() < 0.5 ? "allpins" : "p1center";
+
+    if (topology === "allpins") {
+      // All three pins used.  P1 and P2 legs each get exactly one component so they
+      // fit in the available canvas space; the top chain absorbs the extra variety.
+      const totalTwoPins = randomItem([3, 4, 5]);   // 4-6 total components
+      const topCount = totalTwoPins - 2;             // at least 1 (total ≥ 3)
+
+      const compChainTop = Array.from({ length: topCount }, () => pick2pin());
+      const compChainP1  = [pick2pin()];
+      const compChainP2  = [pick2pin()];
+
+      const nets = [];
+      nets.push({ from: "RAIL_TOP_RED", to: `${compChainTop[0].instanceKey}:${compChainTop[0].entryPin}` });
+      for (let i = 0; i < topCount - 1; i++) {
+        nets.push({ from: `${compChainTop[i].instanceKey}:${compChainTop[i].exitPin}`, to: `${compChainTop[i + 1].instanceKey}:${compChainTop[i + 1].entryPin}` });
+      }
+      nets.push({ from: `${compChainTop[topCount - 1].instanceKey}:${compChainTop[topCount - 1].exitPin}`, to: `${threePcKey}:${centerPin}` });
+
+      nets.push({ from: `${threePcKey}:P1`, to: `${compChainP1[0].instanceKey}:${compChainP1[0].entryPin}` });
+      nets.push({ from: `${compChainP1[0].instanceKey}:${compChainP1[0].exitPin}`, to: "RAIL_TOP_BLUE" });
+
+      nets.push({ from: `${threePcKey}:P2`, to: `${compChainP2[0].instanceKey}:${compChainP2[0].entryPin}` });
+      nets.push({ from: `${compChainP2[0].instanceKey}:${compChainP2[0].exitPin}`, to: "RAIL_TOP_BLUE" });
+
+      return {
+        id: levelNumber,
+        instructions: `Level ${levelNumber}: Build the closed-loop circuit shown.`,
+        required_nets: nets,
+        schematicStyle: "three_pin_tier3",
+        schematicData: {
+          topology,
+          threePc: { type: threePcType, instanceKey: threePcKey, label: label3pc, centerPin },
+          compChainTop,
+          compChainP1,
+          compChainP2,
+        },
+      };
+    }
+
+    // topology === "p1center"
+    // Randomly split 3-5 two-pin components across the top rail and the right leg.
+    const totalTwoPins = randomItem([3, 4, 5]);
+    const topMax  = Math.min(3, totalTwoPins - 1);
+    const topMin  = Math.max(1, totalTwoPins - 2);  // cap rightCount ≤ 2
+    const topCount   = topMin + Math.floor(Math.random() * (topMax - topMin + 1));
+    const rightCount = totalTwoPins - topCount;
+
+    const compChainTop   = Array.from({ length: topCount   }, () => pick2pin());
+    const compChainRight = Array.from({ length: rightCount }, () => pick2pin());
+
+    const nets = [];
+    nets.push({ from: "RAIL_TOP_RED", to: `${compChainTop[0].instanceKey}:${compChainTop[0].entryPin}` });
+    for (let i = 0; i < topCount - 1; i++) {
+      nets.push({ from: `${compChainTop[i].instanceKey}:${compChainTop[i].exitPin}`, to: `${compChainTop[i + 1].instanceKey}:${compChainTop[i + 1].entryPin}` });
+    }
+    nets.push({ from: `${compChainTop[topCount - 1].instanceKey}:${compChainTop[topCount - 1].exitPin}`, to: `${threePcKey}:P1` });
+
+    nets.push({ from: `${threePcKey}:${centerPin}`, to: `${compChainRight[0].instanceKey}:${compChainRight[0].entryPin}` });
+    for (let i = 0; i < rightCount - 1; i++) {
+      nets.push({ from: `${compChainRight[i].instanceKey}:${compChainRight[i].exitPin}`, to: `${compChainRight[i + 1].instanceKey}:${compChainRight[i + 1].entryPin}` });
+    }
+    nets.push({ from: `${compChainRight[rightCount - 1].instanceKey}:${compChainRight[rightCount - 1].exitPin}`, to: "RAIL_TOP_BLUE" });
+
+    return {
+      id: levelNumber,
+      instructions: `Level ${levelNumber}: Build the closed-loop circuit shown. (P2 is not used.)`,
+      required_nets: nets,
+      schematicStyle: "three_pin_tier3",
+      schematicData: {
+        topology,
+        threePc: { type: threePcType, instanceKey: threePcKey, label: label3pc, centerPin },
+        compChainTop,
+        compChainRight,
+      },
     };
   }
 
@@ -3504,12 +4233,9 @@
   // LEVEL 3 SCHEMATIC RENDERERS
   // ============================================================
 
-  function drawInstructionText(text) {
-    schematicCtx.font = "12px Arial";
-    schematicCtx.fillStyle = "#374151";
-    schematicCtx.textAlign = "left";
-    schematicCtx.fillText(text, 16, 44);
-  }
+  // Instructions are shown once in the status-message panel (not on the schematic canvas).
+  // This function is intentionally a no-op; it exists only so existing call sites compile.
+  function drawInstructionText(_text) { /* intentional no-op */ }
 
   // --- Tier 1 renderer: Star topology ---
   // Central junction with three arms: LEFT, RIGHT, and UP.
@@ -3668,6 +4394,404 @@
     // Junction dots at A and B on top rail (C is rightmost so no dot at cX top)
     drawJunctionDot(aX, T);
     drawJunctionDot(bX, T);
+  }
+
+  // ============================================================
+  // LEVEL 4 SCHEMATIC RENDERERS
+  // ============================================================
+
+  // Draw the 3-pin component as a labeled box with three named terminals.
+  // cx, cy = center of the box.
+  // Returns an object with the pixel positions of each terminal lead end:
+  //   { p1: {x, y}, center: {x, y}, p2: {x, y} }
+  // termDir controls which sides the leads exit: "bottom" = all leads exit downward,
+  // "sides" = P1 exits left, P2 exits right, center exits upward.
+  // Dispatches to the type-specific schematic symbol for 3-pin components.
+  // Returns { p1End, centerEnd, p2End } — the pixel positions of each terminal lead end.
+  // (termDir is kept as a parameter for call-site compatibility but ignored; each symbol
+  //  uses its own canonical orientation: P1 exits left, center/wiper exits up, P2 exits right.)
+  function drawThreePinSymbol(comp, cx, cy, termDir = "sides") {
+    if (comp.type === "POT") return drawPOTSchematicSymbol(comp, cx, cy);
+    return drawSlideSwitchSchematicSymbol(comp, cx, cy);
+  }
+
+  // POT: horizontal zigzag resistor body with a wiper arrow exiting upward from the center.
+  // P1 ←—[ZZZZ]—→ P2        (exits left / right at body level)
+  //         ↑  wiper lead exits upward; arrowhead tip points down into body
+  function drawPOTSchematicSymbol(comp, cx, cy) {
+    const { label, centerPin } = comp;
+    const zigHalf   = 22;  // half-width of zigzag body (same as RESISTOR symbol)
+    const outLead   = 18;  // length of P1 / P2 external lead stubs
+    const wiperGap  = 4;   // gap between body centre and arrow tip
+    const arrowH    = 8;   // height of the filled arrowhead
+    const wiperShaft = 12; // shaft length between arrowhead base and external lead
+
+    const arrowTipY  = cy - wiperGap;
+    const arrowBaseY = arrowTipY - arrowH;
+    const centerEndY = arrowBaseY - wiperShaft - outLead;
+
+    schematicCtx.save();
+    schematicCtx.strokeStyle = "#2c3e50";
+    schematicCtx.lineWidth = 2;
+    schematicCtx.lineCap = "round";
+    schematicCtx.lineJoin = "round";
+
+    // P1 external lead (exits left)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx - zigHalf - outLead, cy);
+    schematicCtx.lineTo(cx - zigHalf, cy);
+    schematicCtx.stroke();
+
+    // Zigzag resistor body (identical shape to the RESISTOR symbol in drawSeriesSymbolAt)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx - 22, cy); schematicCtx.lineTo(cx - 18, cy);
+    schematicCtx.lineTo(cx - 13, cy - 10); schematicCtx.lineTo(cx - 5,  cy + 10);
+    schematicCtx.lineTo(cx + 3,  cy - 10); schematicCtx.lineTo(cx + 11, cy + 10);
+    schematicCtx.lineTo(cx + 18, cy - 10); schematicCtx.lineTo(cx + 22, cy);
+    schematicCtx.stroke();
+
+    // P2 external lead (exits right)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx + zigHalf, cy);
+    schematicCtx.lineTo(cx + zigHalf + outLead, cy);
+    schematicCtx.stroke();
+
+    // Wiper external lead (exits upward, above the arrowhead)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx, centerEndY);
+    schematicCtx.lineTo(cx, arrowBaseY);
+    schematicCtx.stroke();
+
+    // Filled arrowhead: tip pointing DOWN into the body, base above
+    schematicCtx.fillStyle = "#2c3e50";
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx, arrowTipY);          // tip
+    schematicCtx.lineTo(cx - 5, arrowBaseY);     // left flange
+    schematicCtx.lineTo(cx + 5, arrowBaseY);     // right flange
+    schematicCtx.closePath();
+    schematicCtx.fill();
+
+    // Component label: to the right of the symbol, vertically between the wiper
+    // terminal and the resistor body so it never overlaps any wire or connection.
+    schematicCtx.fillStyle = "#111827";
+    schematicCtx.font = "bold 12px Arial";
+    schematicCtx.textAlign = "left";
+    const potLabelX = cx + zigHalf + outLead + 6;
+    const potLabelY = Math.round((centerEndY + cy) / 2) + 4;
+    schematicCtx.fillText(label, potLabelX, potLabelY);
+
+    schematicCtx.restore();
+
+    return {
+      p1End:     { x: cx - zigHalf - outLead, y: cy },
+      centerEnd: { x: cx,                     y: centerEndY },
+      p2End:     { x: cx + zigHalf + outLead, y: cy },
+    };
+  }
+
+  // SLIDE_SWITCH (SPDT): all three leads are vertical and parallel.
+  // Common exits upward from the pivot (open circle).
+  // A solid diagonal arm runs from the pivot to the P2 throw contact (open circle) —
+  // showing the "connected" position.
+  // The P1 throw contact (open circle) is standalone — no arm — showing the open position.
+  // Both P1 and P2 leads exit straight downward, parallel to the common lead.
+  //
+  //      | (common, exits UP)
+  //      O  ← pivot (open circle)
+  //       \
+  //   O    O  ← throw contacts (open circles)
+  //   |    |
+  //  P1   P2  (exits DOWN, parallel to common)
+  function drawSlideSwitchSchematicSymbol(comp, cx, cy) {
+    const { label, centerPin } = comp;
+    const comLead   = 20;  // common wire length above pivot
+    const outLead   = 20;  // P1/P2 lead length below contacts
+    const pivotR    = 4;   // pivot open-circle radius
+    const contactR  = 4;   // throw-contact open-circle radius
+    const contactDX = 20;  // horizontal distance from pivot to each throw contact
+    const armDY     = 22;  // vertical distance from pivot centre down to contact centres
+
+    const pivotX    = cx,  pivotY = cy;
+    const centerEndY = pivotY - comLead;
+
+    const p1X = cx - contactDX,  p1Y = cy + armDY;
+    const p2X = cx + contactDX,  p2Y = cy + armDY;
+
+    schematicCtx.save();
+    schematicCtx.strokeStyle = "#2c3e50";
+    schematicCtx.lineWidth = 2;
+    schematicCtx.lineCap = "round";
+    schematicCtx.lineJoin = "round";
+
+    // Common wire: terminal → top of pivot circle (vertical)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(cx, centerEndY);
+    schematicCtx.lineTo(cx, pivotY - pivotR);
+    schematicCtx.stroke();
+
+    // Pivot open circle
+    schematicCtx.beginPath();
+    schematicCtx.arc(pivotX, pivotY, pivotR, 0, Math.PI * 2);
+    schematicCtx.stroke();
+
+    // Switch arm: bottom of pivot → top of P2 contact (solid diagonal)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(pivotX, pivotY + pivotR);
+    schematicCtx.lineTo(p2X, p2Y - contactR);
+    schematicCtx.stroke();
+
+    // P2 throw-contact circle (the "connected" position)
+    schematicCtx.beginPath();
+    schematicCtx.arc(p2X, p2Y, contactR, 0, Math.PI * 2);
+    schematicCtx.stroke();
+
+    // P1 throw-contact circle (the open / unconnected position — no arm)
+    schematicCtx.beginPath();
+    schematicCtx.arc(p1X, p1Y, contactR, 0, Math.PI * 2);
+    schematicCtx.stroke();
+
+    // P1 lead: downward from P1 contact (parallel to common)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(p1X, p1Y + contactR);
+    schematicCtx.lineTo(p1X, p1Y + contactR + outLead);
+    schematicCtx.stroke();
+
+    // P2 lead: downward from P2 contact (parallel to common)
+    schematicCtx.beginPath();
+    schematicCtx.moveTo(p2X, p2Y + contactR);
+    schematicCtx.lineTo(p2X, p2Y + contactR + outLead);
+    schematicCtx.stroke();
+
+    // Component label: to the right of the symbol, vertically between the common
+    // terminal and the throw contacts so it never overlaps any wire or connection.
+    schematicCtx.fillStyle = "#111827";
+    schematicCtx.font = "bold 12px Arial";
+    schematicCtx.textAlign = "left";
+    const labelX = p2X + contactR + 6;
+    const labelY = Math.round((centerEndY + p2Y) / 2) + 4;   // midpoint between exits
+    schematicCtx.fillText(label, labelX, labelY);
+
+    schematicCtx.restore();
+
+    const p1EndY = p1Y + contactR + outLead;
+    const p2EndY = p2Y + contactR + outLead;
+    return {
+      p1End:     { x: p1X, y: p1EndY },
+      centerEnd: { x: cx,  y: centerEndY },
+      p2End:     { x: p2X, y: p2EndY },
+    };
+  }
+
+  // Draw a small open circle to mark a floating / unconnected terminal end
+  function drawFloatingTerminal(x, y) {
+    schematicCtx.save();
+    schematicCtx.strokeStyle = "#9ca3af";
+    schematicCtx.lineWidth = 1.5;
+    schematicCtx.beginPath();
+    schematicCtx.arc(x, y, 4, 0, Math.PI * 2);
+    schematicCtx.stroke();
+    schematicCtx.restore();
+  }
+
+  // Tier 1: 3-pin component centred on canvas; one terminal wires to a 2-pin element.
+  // The element is placed in the direction the connected pin exits.
+  // The other two terminals float (open circles).
+  function drawThreePinTier1Schematic(levelGoal) {
+    const { threePc, connectedPin, other } = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    // 3-pin symbol: centred — same position as Tier 2 so the layout looks consistent
+    const symCX = 240, symCY = 175;
+    const { p1End, centerEnd, p2End } = drawThreePinSymbol(threePc, symCX, symCY, "sides");
+
+    const centerPinName = threePc.centerPin;
+    const endByPin = { P1: p1End, [centerPinName]: centerEnd, P2: p2End };
+
+    // Float the two pins that are NOT connected
+    ["P1", centerPinName, "P2"].forEach(pin => {
+      if (pin !== connectedPin) drawFloatingTerminal(endByPin[pin].x, endByPin[pin].y);
+    });
+
+    const ws      = endByPin[connectedPin]; // wire-start position
+    const halfLen = getSymbolHalfLengthForElement(other);
+    const margin  = 18; // gap between wire-start and element body
+
+    if (connectedPin === "P2") {
+      // P2 exits RIGHT → element placed to the right
+      const elemX = ws.x + margin + halfLen;
+      const elemY = ws.y;
+      const angle = isEntryPin(other) ? 0 : Math.PI;
+      drawSchematicLine(ws.x, ws.y, elemX - halfLen, elemY);
+      drawSeriesSymbolAt(other, elemX, elemY, angle);
+      const floatX = elemX + halfLen + margin;
+      drawSchematicLine(elemX + halfLen, elemY, floatX, elemY);
+      drawFloatingTerminal(floatX, elemY);
+
+    } else if (connectedPin === "P1") {
+      // P1 exits LEFT → element placed to the left
+      const elemX = ws.x - margin - halfLen;
+      const elemY = ws.y;
+      // Wire from 3PC comes from the right side of this element, so entry side faces RIGHT
+      const angle = isEntryPin(other) ? Math.PI : 0;
+      drawSchematicLine(ws.x, ws.y, elemX + halfLen, elemY);
+      drawSeriesSymbolAt(other, elemX, elemY, angle);
+      const floatX = elemX - halfLen - margin;
+      drawSchematicLine(elemX - halfLen, elemY, floatX, elemY);
+      drawFloatingTerminal(floatX, elemY);
+
+    } else {
+      // Common / Wiper exits UP → element placed above
+      const elemX = ws.x;
+      const elemY = ws.y - margin - halfLen;
+      // Wire comes from below the element, so entry side should face DOWN
+      const angle = isEntryPin(other) ? -Math.PI / 2 : Math.PI / 2;
+      drawSchematicLine(ws.x, ws.y, elemX, elemY + halfLen);
+      drawSeriesSymbolAt(other, elemX, elemY, angle);
+      const floatY = elemY - halfLen - margin;
+      drawSchematicLine(elemX, elemY - halfLen, elemX, floatY);
+      drawFloatingTerminal(elemX, floatY);
+    }
+  }
+
+  // Tier 2: 3-pin component in center with all 3 pins wired to separate elements.
+  // P1 → element LEFT, center → element UP, P2 → element RIGHT.
+  function drawThreePinTier2Schematic(levelGoal) {
+    const { threePc, compLeft, compCenter, compRight } = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    // 3-pin symbol: box centered in middle of canvas, leads exiting sides + top
+    const symCX = 240, symCY = 175;
+    const { p1End, centerEnd, p2End } = drawThreePinSymbol(threePc, symCX, symCY, "sides");
+
+    // LEFT element (P1 exits LEFT from box → wire runs left → element is to the left).
+    // The 3PC connection point is on the RIGHT side of the element run.
+    // angle=π → entry pin on the RIGHT = entry pin faces the 3PC. Use when entry pin is wired to 3PC.
+    // angle=0 → entry pin on the LEFT = exit pin faces the 3PC. Use when exit pin is wired to 3PC.
+    const leftHalf  = getSymbolHalfLengthForElement(compLeft);
+    const leftAngle = isEntryPin(compLeft) ? Math.PI : 0;
+    const leftElemX = 80;
+    drawSchematicLine(p1End.x, p1End.y, leftElemX + leftHalf, p1End.y);
+    drawSeriesSymbolAt(compLeft, leftElemX, p1End.y, leftAngle);
+    drawSchematicLine(leftElemX - leftHalf, p1End.y, 35, p1End.y);
+    drawFloatingTerminal(35, p1End.y);
+
+    // UP element (center pin exits UPWARD from box → 3PC connection is at the BOTTOM of the element run).
+    // angle=-π/2 → entry pin at BOTTOM = entry pin faces the 3PC. Use when entry pin is wired to 3PC.
+    // angle=+π/2 → entry pin at TOP   = exit pin faces the 3PC. Use when exit pin is wired to 3PC.
+    const upHalf  = getSymbolHalfLengthForElement(compCenter);
+    const upAngle = isEntryPin(compCenter) ? -Math.PI / 2 : Math.PI / 2;
+    const upElemY = 60;
+    drawSchematicLine(centerEnd.x, centerEnd.y, centerEnd.x, upElemY + upHalf);
+    drawSeriesSymbolAt(compCenter, centerEnd.x, upElemY, upAngle);
+    drawSchematicLine(centerEnd.x, upElemY - upHalf, centerEnd.x, 20);
+    drawFloatingTerminal(centerEnd.x, 20);
+
+    // RIGHT element (P2 exits RIGHT from box → 3PC connection is on the LEFT side of the element run).
+    // angle=0 → entry pin on the LEFT = entry pin faces the 3PC. Use when entry pin is wired to 3PC.
+    // angle=π → entry pin on the RIGHT = exit pin faces the 3PC. Use when exit pin is wired to 3PC.
+    const rightHalf  = getSymbolHalfLengthForElement(compRight);
+    const rightAngle = isEntryPin(compRight) ? 0 : Math.PI;
+    const rightElemX = 400;
+    drawSchematicLine(p2End.x, p2End.y, rightElemX - rightHalf, p2End.y);
+    drawSeriesSymbolAt(compRight, rightElemX, p2End.y, rightAngle);
+    drawSchematicLine(rightElemX + rightHalf, p2End.y, 455, p2End.y);
+    drawFloatingTerminal(455, p2End.y);
+  }
+
+  // Draw N components evenly spaced in series along a straight line segment.
+  // angle=0 → horizontal (left-to-right), angle=π/2 → vertical (top-to-bottom).
+  function drawChainOnSegment(comps, x1, y1, x2, y2, angle) {
+    const n   = comps.length;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    let prevX = x1, prevY = y1;
+    for (let i = 0; i < n; i++) {
+      const t    = (i + 1) / (n + 1);
+      const cx   = x1 + (x2 - x1) * t;
+      const cy   = y1 + (y2 - y1) * t;
+      const half = getSymbolHalfLengthForElement(comps[i]);
+      drawSchematicLine(prevX, prevY, cx - cos * half, cy - sin * half);
+      drawSeriesSymbolAt(comps[i], cx, cy, angle);
+      prevX = cx + cos * half;
+      prevY = cy + sin * half;
+    }
+    drawSchematicLine(prevX, prevY, x2, y2);
+  }
+
+  // Tier 3 renderer — dispatches on topology stored in schematicData.
+  function drawThreePinTier3Schematic(levelGoal) {
+    const sd = levelGoal.schematicData;
+    drawInstructionText(levelGoal.instructions);
+
+    if (sd.topology === "allpins") {
+      drawTier3AllPins(sd);
+    } else {
+      // "p1center" + legacy fallback (compA/compB keys)
+      const compChainTop   = sd.compChainTop   || [sd.compA];
+      const compChainRight = sd.compChainRight || [sd.compB];
+      drawTier3P1Center(sd.threePc, compChainTop, compChainRight);
+    }
+  }
+
+  // "p1center": VCC → chain-top → 3PC:P1 … 3PC:center → chain-right → GND.  P2 floats.
+  function drawTier3P1Center(threePc, compChainTop, compChainRight) {
+    const BL = 45, BR = 455, T = 60, B = 268;
+
+    drawBatteryVertical(BL, T, B);
+
+    // Draw symbol first so we know p1End.x — chain then runs BL → p1End.x (maximises width)
+    const symCX = 300, symCY = T + 70;  // 130px — gives right leg ~158px (SS) / ~180px (POT)
+    const { p1End, centerEnd, p2End } = drawThreePinSymbol(threePc, symCX, symCY, "sides");
+
+    // Top chain: runs from BL toward P1, then drops to P1.
+    // SLIDE_SWITCH P1 exits downward, so jog left to avoid overdrawing the lead.
+    // POT P1 exits horizontally, so a direct vertical drop is clean.
+    if (threePc.type === "SLIDE_SWITCH") {
+      const jog = 30;
+      drawChainOnSegment(compChainTop, BL, T, p1End.x - jog, T, 0);
+      drawSchematicLine(p1End.x - jog, T, p1End.x - jog, p1End.y);
+      drawSchematicLine(p1End.x - jog, p1End.y, p1End.x, p1End.y);
+    } else {
+      drawChainOnSegment(compChainTop, BL, T, p1End.x, T, 0);
+      drawSchematicLine(p1End.x, T, p1End.x, p1End.y);
+    }
+
+    drawFloatingTerminal(p2End.x, p2End.y);
+
+    const bX = Math.round((centerEnd.x + BR) / 2);
+    drawSchematicLine(centerEnd.x, centerEnd.y, bX, centerEnd.y);
+    drawChainOnSegment(compChainRight, bX, centerEnd.y, bX, B, Math.PI / 2);
+    drawSchematicLine(bX, B, BL, B);
+  }
+
+  // "allpins": VCC → chain-top → 3PC:Common; 3PC:P1 → chain-P1 → GND; 3PC:P2 → chain-P2 → GND.
+  // P1 jogs left and P2 jogs right before dropping, giving visual separation between the two legs.
+  function drawTier3AllPins(sd) {
+    const { threePc, compChainTop, compChainP1, compChainP2 } = sd;
+    const BL = 45, T = 60, B = 268;
+    const JOG = 40;   // px each terminal steps outward before descending
+
+    drawBatteryVertical(BL, T, B);
+
+    const symCX = 270, symCY = (T + B) / 2;
+    const { p1End, centerEnd, p2End } = drawThreePinSymbol(threePc, symCX, symCY, "sides");
+
+    // Top rail: BL → chain → centerEnd.x, then vertical stub down to centerEnd
+    drawChainOnSegment(compChainTop, BL, T, centerEnd.x, T, 0);
+    drawSchematicLine(centerEnd.x, T, centerEnd.x, centerEnd.y);
+
+    // P1 leg: jog left, then drop vertically to GND
+    const p1X = p1End.x - JOG;
+    drawSchematicLine(p1End.x, p1End.y, p1X, p1End.y);
+    drawChainOnSegment(compChainP1, p1X, p1End.y, p1X, B, Math.PI / 2);
+
+    // P2 leg: jog right, then drop vertically to GND
+    const p2X = p2End.x + JOG;
+    drawSchematicLine(p2End.x, p2End.y, p2X, p2End.y);
+    drawChainOnSegment(compChainP2, p2X, p2End.y, p2X, B, Math.PI / 2);
+
+    // Bottom GND rail
+    drawSchematicLine(BL, B, p2X, B);
   }
 
   function generateLevel5(levelNumber) {
